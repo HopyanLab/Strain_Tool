@@ -159,13 +159,9 @@ def get_shift (image_1, image_2, tracking_method = 'ski',
 		return np.array([0,0])
 
 def get_shift_ski (image_1, image_2, window = None):
-	image_1 = prepare_image(image_1.astype(float))
-	image_2 = prepare_image(image_2.astype(float))
-	if window is not None:
-		image_1 = image_1 * window
-		image_2 = image_2 * window
 	shift, error, phase = phase_cross_correlation(image_1, image_2,
-												  upsample_factor=100)
+												  upsample_factor=100,
+												  normalization=None)
 	return -shift[::-1]
 
 def get_shift_fft (image_1, image_2, window = None):
@@ -1306,7 +1302,7 @@ class Window(QWidget):
 							minimum_value = self.t_lower,
 							maximum_value = self.t_upper,
 							text = 'Tracking Points: %p%')
-		result = np.array([0.,0.])
+		result = np.array([0.,0.], dtype = float)
 		if tracking_method == 'ski':
 			window = None
 		else:
@@ -1386,7 +1382,7 @@ class Window(QWidget):
 												self.fine_gaussian)
 		#	full_image_2 = ndi.spline_filter(full_image_2)
 			for p_index, o_point in enumerate(self.track_points):
-				point = o_point + results[p_index]
+				point = o_point + np.around(results[p_index]).astype(int)
 				x_1_lower = point[0] - self.search_distance * 2
 				x_1_upper = point[0] + self.search_distance * 2
 				y_1_lower = point[1] - self.search_distance * 2
@@ -1431,13 +1427,15 @@ class Window(QWidget):
 		if not (self.coarse_search_done or self.fine_search_done):
 			self.instruction_text.setText('Must do some tracking first.')
 			return
-		results = np.around(self.fine_results).astype(int) + \
-									self.track_points[np.newaxis,:,:]
+	#	results = np.around(self.fine_results).astype(int) + \
+	#								self.track_points[np.newaxis,:,:]
+		results = self.fine_results + \
+							self.track_points[np.newaxis,:,:].astype(float)
 		if len(self.coarse_results) == len(self.fine_results):
-			results += np.around(
-							self.coarse_results[:,np.newaxis,:]).astype(int)
+			results += self.coarse_results[:,np.newaxis,:]
+		results = results*self.scale[0:2]
 		output_array = np.zeros((results.shape[0]*results.shape[1],5),
-								dtype = int)
+								dtype = float)
 		counter = 1
 		for time_point in range(results.shape[0]):
 			for point in range(results.shape[1]):
