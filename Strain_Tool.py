@@ -36,6 +36,8 @@ from skimage import data
 from skimage.registration import phase_cross_correlation
 from pathlib import Path
 from aicsimageio import AICSImage
+from zipfile import ZipFile
+from PIL import Image
 #from aicspylibczi import CziFile
 #from nd2reader import ND2Reader
 #from imaris_ims_file_reader.ims import ims
@@ -98,6 +100,19 @@ transparent_cmap = LinearSegmentedColormap('transparent_cmap',
 cm.register_cmap(cmap=transparent_cmap)
 
 ################################################################################
+# remove tree method for pathlib #
+##################################
+
+def rm_tree(pth):
+	pth = Path(pth)
+	for child in pth.glob('*'):
+		if child.is_file():
+			child.unlink()
+		else:
+			rm_tree(child)
+	pth.rmdir()
+
+################################################################################
 # read image arrays from data files #
 #####################################
 
@@ -123,14 +138,86 @@ def get_image (image_stack,
 	image = None
 	if image_stack is not None:
 		if channel is None:
-			channel = 0
-		image = image_stack.get_image_data('YX',
-									C = channel,
-									T = t_value,
-									Z = z_value)
+			image = image_stack.get_image_data('YXC',
+									#	C = channel,
+										T = t_value,
+										Z = z_value)
+			image = np.sum(image, axis = -1)
+		else:
+			image = image_stack.get_image_data('YX',
+										C = channel,
+										T = t_value,
+										Z = z_value)
 	else:
 		display_error('No data file loaded!')
 	return image
+
+################################################################################
+# digital image correlation functions #
+#######################################
+
+class zip_tiff_stack:
+	def __init__ (self, zip_file_path):
+		self.zip_file = ZipFile(zip_file_path)
+		self.tif_dir = zip_file_path.parent/'temp'
+		if self.tif_dir.exists():
+			rm_tree(self.tif_dir)
+		self.zip_file.extractall(self.tif_dir)
+		self.name_list = self.zip_file.namelist()
+		self.t_list = np.array([(element.split('.')[-2]).split('_')[-2].lstrip(
+							'T') for element in self.name_list]).astype(int)
+		self.z_list = np.array([(element.split('.')[-2]).split('_')[-1].lstrip(
+							'Z') for element in self.name_list]).astype(int)
+		self.t_values = np.unique(self.t_list)
+		self.z_values = np.unique(self.z_list)
+		image = Image.open(self.tif_dir/self.name_list[0])
+		image_array = np.array(image)
+		test = np.sum(image_array, axis=(0,1))
+		self.mask = (test != 0)
+		if len(test) == 3:
+			self.channel_names = np.array(['red','green','blue'])
+		elif len(test) == 1:
+			self.channel_names = np.array(['grey'])
+		self.shape = np.array([len(self.t_values),
+							   len(self.channel_names),
+							   len(self.z_values),
+							   image_array.shape[0],
+							   image_array.shape[1]])
+		print(self.shape)
+		print(self.channel_names)
+		self.physical_pixel_sizes = [1,1,1]
+	def get_image_data(self, string, C = 0, T = 0, Z = 0):
+		file_index = np.argmax((self.t_list == T) & (self.z_list == Z))
+		image_array = np.array(
+						Image.open(self.tif_dir/self.name_list[file_index]))
+		if string == 'YX':
+			return image_array[:,:,C]
+		else:
+			return image_array
+
+################################################################################
+# function to compute strains for triangle element #
+####################################################
+
+def compute_strain (tri_0, tri_1):
+	if np.cross(tri_0[1]-tri_0[0], tri_0[2]-tri_0[1]) < 0:
+		tri_0 = tri_0[::-1]
+		tri_1 = tri_1[::-1]
+	delta = tri_1 - tri_0
+	x_13 = tri_0[0,0]-tri_0[2,0]
+	x_23 = tri_0[1,0]-tri_0[2,0]
+	y_13 = tri_0[0,1]-tri_0[2,1]
+	y_23 = tri_0[1,1]-tri_0[2,1]
+	dx_13 = delta[0,0]-delta[2,0]
+	dx_23 = delta[1,0]-delta[2,0]
+	dy_13 = delta[0,1]-delta[2,1]
+	dy_23 = delta[1,1]-delta[2,1]
+	det_j = x_13 * y_23 - y_13 * x_23
+	eps_xx = (y_23 * dx_13 - y_13 * dx_23) / det_j
+	eps_xy = (x_13 * dx_23 - x_23 * dx_13 +
+				y_23 * dy_13 - y_13 * dy_23) / det_j / 2
+	eps_yy = (x_13 * dy_23 - x_23 * dy_13) / det_j
+	return eps_xx, eps_yy, eps_xy
 
 ################################################################################
 # digital image correlation functions #
@@ -148,7 +235,7 @@ def prepare_image (image):
 def get_shift (image_1, image_2, tracking_method = 'ski',
 			   search_distance = 12, window = None):
 	if tracking_method == 'ski':
-		return get_shift_ski(image_1,image_2)
+		return get_shift_ski(image_1, image_2)
 	elif tracking_method == 'fft':
 		return get_shift_fft(image_1, image_2, window)
 	elif tracking_method == 'con':
@@ -404,8 +491,35 @@ class MPLCanvas(FigureCanvas):
 		self.show_points = False
 		# colour choices
 		self.colormap = 'afmhot'
-		self.marker_color = 'white'
-		self.marker_alpha = 0.5
+		self.marker_color = 'blue' # 'white'
+		self.marker_alpha = 0.8
+		#
+		self.zoomed = False
+		self.flip_vertical = False
+	
+	def set_flip (self, flip_vertical = False):
+		self.flip_vertical = flip_vertical
+		self.set_bounds()
+		self.draw()
+	
+	def set_zoom (self, zoomed = False):
+		self.zoomed = zoomed
+		self.set_bounds()
+		self.draw()
+	
+	def set_bounds (self):
+		if self.zoomed and self.focus_box is not None:
+			self.ax.set_xlim(
+						left = self.focus_box[0,0] + self.drift_adjust[0],
+						right = self.focus_box[0,1] + self.drift_adjust[0] )
+			self.ax.set_ylim(
+						bottom = self.focus_box[1,0] + self.drift_adjust[1],
+						top = self.focus_box[1,1] + self.drift_adjust[1] )
+		else:
+			self.ax.set_xlim(left = 0, right = self.image_array.shape[1])
+			self.ax.set_ylim(bottom = 0, top = self.image_array.shape[0])
+		if self.flip_vertical:
+			self.ax.invert_yaxis()
 	
 	def update_image (self, image_array = np.array([[0]], dtype = int),
 							drift_adjust = np.array([0,0], dtype = int)):
@@ -432,22 +546,27 @@ class MPLCanvas(FigureCanvas):
 		self.plot_box()
 	
 	def update_colors (self, colormap = 'afmhot',
-							 marker_color = 'white',
-							 marker_alpha = 0.5):
+							 marker_color = 'blue', # 'white',
+							 marker_alpha = 0.8):
 		self.colormap = colormap
 		self.marker_color = marker_color
 		self.marker_alpha = marker_alpha
 	
 	def plot_image (self):
 		self.remove_plot_element(self.image_plot)
-		self.ax.set_xlim(left = 0, right = self.image_array.shape[1])
-		self.ax.set_ylim(bottom = 0, top = self.image_array.shape[0])
-		self.image_plot = self.ax.imshow(self.image_array,
-										 cmap = self.colormap,
-										 zorder = 1)
+	#	self.ax.set_xlim(left = 0, right = self.image_array.shape[1])
+	#	self.ax.set_ylim(bottom = 0, top = self.image_array.shape[0])
+		if len(self.image_array.shape) == 2:
+			self.image_plot = self.ax.imshow(self.image_array,
+											 cmap = self.colormap,
+											 zorder = 1)
+		else:
+			self.image_plot = self.ax.imshow(self.image_array,
+											 zorder = 1)
 		if self.drift_changed:
 			self.plot_box()
 			self.plot_points()
+		self.set_bounds()
 		self.draw()
 	
 	def plot_points (self):
@@ -745,8 +864,12 @@ class Window(QWidget):
 							focus_layout, 'Y Max:')
 		self.checkbox_zoom = setup_checkbox(
 							self.zoom_checkbox,
-							focus_layout, 'zoomed' + ' (TODO)',
+							focus_layout, 'zoomed',
 							self.zoomed)
+		self.checkbox_flip = setup_checkbox(
+							self.flip_checkbox,
+							focus_layout, 'flipped',
+							False)
 		#
 		focus_layout.addStretch()
 		horizontal_separator(focus_layout, self.palette())
@@ -1004,7 +1127,11 @@ class Window(QWidget):
 	
 	def zoom_checkbox (self):
 		self.zoomed = self.checkbox_zoom.isChecked()
-		
+		self.canvas.set_zoom(self.zoomed)
+	
+	def flip_checkbox (self):
+		flipped = self.checkbox_flip.isChecked()
+		self.canvas.set_flip(flipped)
 	
 	def select_bounds (self):
 		self.zoomed = False
@@ -1097,16 +1224,18 @@ class Window(QWidget):
 		if self.process_running:
 			display_error('Cannot change file while processing!')
 		elif self.file_dialog():
-			if self.file_path is not None:
+			if self.file_path.suffix.lower() == '.zip':
+				self.image_stack = zip_tiff_stack(self.file_path)
+			elif self.file_path is not None:
 				self.image_stack = AICSImage(str(self.file_path))
-				image_shape = self.image_stack.shape
-				self.x_size = image_shape[4]
-				self.y_size = image_shape[3]
-				self.z_size = image_shape[2]
-				self.c_size = image_shape[1]
-				self.t_size = image_shape[0]
-				self.channel_names = self.image_stack.channel_names
-				self.scale = self.image_stack.physical_pixel_sizes[::-1]
+			image_shape = self.image_stack.shape
+			self.x_size = image_shape[4]
+			self.y_size = image_shape[3]
+			self.z_size = image_shape[2]
+			self.c_size = image_shape[1]
+			self.t_size = image_shape[0]
+			self.channel_names = self.image_stack.channel_names
+			self.scale = self.image_stack.physical_pixel_sizes[::-1]
 			self.x_lower = 0
 			self.x_upper = self.x_size-1
 			self.y_lower = 0
@@ -1133,6 +1262,7 @@ class Window(QWidget):
 		options |= QFileDialog.DontUseNativeDialog
 		file_name, _ = QFileDialog.getOpenFileName(self,
 								'Open Microscope File', '',
+								'ZIP Files (*.zip);;' + \
 								'CZI Files (*.czi);;' + \
 								'ND2 Files (*.nd2);;' + \
 								'All Files (*)',
@@ -1142,7 +1272,8 @@ class Window(QWidget):
 		else:
 			file_path = Path(file_name)
 			if file_path.suffix.lower() == '.nd2' or \
-			   file_path.suffix.lower() == '.czi':
+			   file_path.suffix.lower() == '.czi' or \
+			   file_path.suffix.lower() == '.zip':
 				self.file_path = file_path
 				return True
 			else:
