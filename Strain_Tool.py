@@ -2,6 +2,7 @@
 
 import sys
 import time
+import copy
 import numpy as np
 import mahotas as mh
 from matplotlib import pyplot as plt
@@ -1001,6 +1002,9 @@ class Window(QWidget):
 		self.button_save_csv = setup_button(
 					 self.save_csv,
 					 bottom_layout, 'Save CSV')
+		self.button_save_frames = setup_button(
+					 self.save_frames,
+					 bottom_layout, 'Save Frames')
 		return bottom_layout
 	
 	def t_slider_select (self):
@@ -1582,6 +1586,20 @@ class Window(QWidget):
 				output_array,  delimiter = ',',
 				fmt = data_format,
 				header = 'X,Y,Time,TrackID,ID')
+	
+	def save_frames (self):
+		initial_time = self.t_position
+		for index, current_time in enumerate(
+									range(self.t_lower, self.t_upper+1)):
+			self.t_position = current_time
+			self.refresh_image()
+			current_frame = copy.deepcopy(self.canvas.fig)
+			current_frame.axes[0].get_xaxis().set_visible(False)
+			current_frame.axes[0].get_yaxis().set_visible(False)
+			current_frame.savefig(self.file_path.with_suffix(f'.{index:d}.png'),
+									bbox_inches='tight',pad_inches = 0)
+		self.t_position = initial_time
+		self.refresh_image()
 
 ################################################################################
 
