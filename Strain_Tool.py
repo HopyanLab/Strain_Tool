@@ -5,6 +5,7 @@ import time
 import copy
 import numpy as np
 import mahotas as mh
+from scipy.spatial import Delaunay
 from matplotlib import pyplot as plt
 import matplotlib
 matplotlib.use('Qt5Agg')
@@ -159,7 +160,7 @@ def get_image (image_stack,
 									#	C = channel,
 										T = t_value,
 										Z = z_value)
-			image = np.sum(image, axis = -1)
+	#		image = np.sum(image, axis = -1)
 		else:
 			image = image_stack.get_image_data('YX',
 										C = channel,
@@ -170,10 +171,42 @@ def get_image (image_stack,
 	return image
 
 ################################################################################
-# digital image correlation functions #
+# class to open single tif image. Not used. #
+#############################################
+
+class single_tif_stack:
+	def __init__ (self, tif_file_path):
+		self.t_values = np.array([0])
+		self.z_values = np.array([0])
+		self.tif_image = Image.open(tif_file_path)
+		self.image_array = np.array(self.tif_image)
+		self.shape = self.image_array.shape
+		print(self.shape)
+		if len(self.shape) == 3 and self.shape[2]>2:
+			self.channel_names = np.array(['red','green','blue'])
+		else:
+			self.channel_names = np.array(['grey'])
+		self.shape = np.array([len(self.t_values),
+							   len(self.channel_names),
+							   len(self.z_values),
+							   self.image_array.shape[0],
+							   self.image_array.shape[1]])
+		print(self.shape)
+		print(self.channel_names)
+		self.physical_pixel_sizes = [1,1,1]
+	def get_image_data(self, string, C = 0, T = 0, Z = 0):
+		if len(self.shape) == 2:
+			return self.image_array
+		elif string == 'YX':
+			return self.image_array[:,:,C]
+		else:
+			return self.image_array
+
+################################################################################
+# class to open tif stack from imageJ #
 #######################################
 
-class zip_tiff_stack:
+class zip_tif_stack:
 	def __init__ (self, zip_file_path):
 		self.zip_file = ZipFile(zip_file_path)
 		self.tif_dir = zip_file_path.parent/'temp'
@@ -270,7 +303,7 @@ def get_shift (image_1, image_2, tracking_method = 'ski',
 
 def get_shift_ski (image_1, image_2, window = None):
 	shift, error, phase = phase_cross_correlation(image_1, image_2,
-												  upsample_factor=16,
+												  upsample_factor=100,
 												  normalization=None)
 	return -shift[::-1]
 
@@ -322,8 +355,10 @@ def get_shift_bpf(image_1, image_2, search_distance = 12):
 #####################################
 
 def find_centres (frame, neighbourhood_size,
-				  threshold_difference, gauss_deviation):
-	x_size, y_size = frame.shape
+				  threshold_difference, gauss_deviation, channel = 0):
+	x_size, y_size = frame.shape[0:2]
+	if len(frame.shape) == 3:
+		frame = frame[:,:,channel]
 	frame = ndi.gaussian_filter(frame, gauss_deviation)
 	frame_max = ndi.maximum_filter(frame, neighbourhood_size)
 	maxima = (frame == frame_max)
@@ -348,7 +383,51 @@ def find_centres (frame, neighbourhood_size,
 			good_centres -= 1
 		good_centres += 1
 	centres = centres[:good_centres]
+	# TODO: more elegant way to do this!
+	to_remove = np.zeros(centres.shape[0])
+	for i, centre_i in enumerate(centres):
+		if to_remove[i]:
+			continue
+		for j, centre_j in enumerate(centres):
+			if i == j:
+				continue
+			if to_remove[j]:
+				continue
+			if np.linalg.norm(centre_i-centre_j) < neighbourhood_size/2:
+				centre_i = (centre_i + centre_j)/2
+				to_remove[j] = 1
+	centres = centres[to_remove == 0]
+	#
 	return centres
+
+################################################################################
+# function to triangulate point cloud #
+#######################################
+
+def triangulate (points, max_length = None):
+	triangles = Delaunay(points).simplices
+	num_triangles = len(triangles)
+	edges_1 = triangles[:,0:2]
+	edges_2 = triangles[:,1:]
+	edges_3 = triangles[:,0::2]
+	edges = np.vstack([edges_1, edges_2, edges_3])
+	lengths = np.linalg.norm(points[edges][:,0,:] -
+							 points[edges][:,1,:], axis=-1)
+	mean_length = np.mean(lengths)
+	if max_length is not None:
+		if max_length > 0:
+			edge_mask = (lengths < max_length)
+		else:
+			edge_mask = (lengths > 0)
+	else:
+		edge_mask = (lengths > 0)
+	triangle_mask = np.logical_and(np.logical_and(edge_mask[:num_triangles],
+								edge_mask[num_triangles:2*num_triangles]),
+								edge_mask[2*num_triangles:3*num_triangles])
+	edges = np.sort(edges[edge_mask], axis=1)
+	edges = np.unique(edges, axis=0)
+	triangles = triangles[triangle_mask]
+	return edges, triangles
 
 ################################################################################
 # helper functions for GUI elements #
@@ -474,6 +553,25 @@ def update_slider (slider, value = None,
 	if maximum_value is not None:
 		slider.setMaximum(maximum_value)
 
+def setup_combobox (function, layout, label_text):
+	combobox = QComboBox()
+	need_inner = not isinstance(layout, QHBoxLayout)
+	if need_inner:
+		inner_layout = QHBoxLayout()
+	label = QLabel(label_text)
+	label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+	if need_inner:
+		inner_layout.addWidget(label)
+	else:
+		layout.addWidget(label)
+	combobox.currentIndexChanged.connect(function)
+	if need_inner:
+		inner_layout.addWidget(combobox)
+		layout.addLayout(inner_layout)
+	else:
+		layout.addWidget(combobox)
+	return combobox
+
 def clear_layout (layout):
 	for i in reversed(range(layout.count())): 
 		widgetToRemove = layout.takeAt(i).widget()
@@ -503,18 +601,21 @@ class MPLCanvas(FigureCanvas):
 		self.drift_adjust = np.array([0,0], dtype = int)
 		self.drift_changed = False
 		self.focus_box = None # np.array([[x_0, x_1], [y_0, y_1]])
+		self.edges = np.zeros((0,2), dtype = int)
 		# plot objects
 		self.image_plot = None
 		self.box_plot = None
 		self.points_plot = None
+		self.edge_plot = None
 		self.bad_points_plot = None
 		self.select_box = None
 		# boolean flags
 		self.show_box = False
 		self.show_points = False
+		self.show_edges = True
 		# colour choices
 		self.colormap = 'afmhot'
-		self.marker_color = 'blue' # 'white'
+		self.marker_color = 'white' # 'blue'
 		self.marker_alpha = 0.8
 		#
 		self.zoomed = False
@@ -564,12 +665,16 @@ class MPLCanvas(FigureCanvas):
 		self.bad_points = bad_points
 		self.plot_points()
 	
+	def update_edges (self, edges = np.zeros((0,2), dtype = int)):
+		self.edges = edges
+		self.plot_edges()
+	
 	def update_focus_box (self, focus_box):
 		self.focus_box = focus_box
 		self.plot_box()
 	
 	def update_colors (self, colormap = 'afmhot',
-							 marker_color = 'blue', # 'white',
+							 marker_color = 'white', # 'blue'
 							 marker_alpha = 0.8):
 		self.colormap = colormap
 		self.marker_color = marker_color
@@ -628,6 +733,19 @@ class MPLCanvas(FigureCanvas):
 		else:
 			self.points_plot = None
 			self.bad_points_plot = None
+		self.draw()
+	
+	def plot_edges (self):
+		self.remove_plot_element(self.edge_plot)
+		if self.show_edges and len(self.edges) > 0:
+			self.edge_plot = self.ax.plot(self.track_points[self.edges.T,0],
+										  self.track_points[self.edges.T,1],
+										  color = 'gray',
+										  linestyle = '-',
+										  linewidth = 1,
+										  alpha = 0.8,
+										  zorder = 2)
+		print(self.edge_plot)
 		self.draw()
 	
 	def plot_box (self):
@@ -739,7 +857,7 @@ class Window(QWidget):
 		self.grid_defaults = np.array([8,8])
 		self.grid_number_x = self.grid_defaults[0]
 		self.grid_number_y = self.grid_defaults[1]
-		self.centres_defaults = np.array([16,1,2])
+		self.centres_defaults = np.array([24,1,8])
 		self.neighbourhood_size = self.centres_defaults[0]
 		self.threshold_difference = self.centres_defaults[1]
 		self.gauss_deviation = self.centres_defaults[2]
@@ -756,6 +874,10 @@ class Window(QWidget):
 		self.coarse_results = None
 		self.fine_search_done = False
 		self.fine_results = None
+		#
+		self.max_length = 0
+		self.edges = np.zeros((0,2), dtype = int)
+		self.triangles = np.zeros((0,2), dtype = int)
 		#
 		self.process_running = False
 		self.coarse_tracking = False
@@ -802,6 +924,7 @@ class Window(QWidget):
 		tabs.setMaximumWidth(220)
 		setup_tab(tabs, self.setup_focus_layout(), 'focus')
 		setup_tab(tabs, self.setup_points_layout(), 'points')
+		setup_tab(tabs, self.setup_strain_layout(), 'strain')
 	#	setup_tab(tabs, self.setup_colours_layout(), 'colours')
 		options_layout.addWidget(tabs)
 		#
@@ -951,6 +1074,9 @@ class Window(QWidget):
 		horizontal_separator(points_layout, self.palette())
 		#
 		points_layout.addWidget(QLabel('Bright Points'))
+		self.channel_selector = setup_combobox(
+							self.channel_select,
+							points_layout, 'Channel:')
 		self.textbox_neighbourhood = setup_textbox(
 							self.points_textbox_select,
 							points_layout, 'Neighbourhood:')
@@ -1003,6 +1129,26 @@ class Window(QWidget):
 		self.setup_points_textboxes()
 		#
 		return points_layout
+	
+	def setup_strain_layout (self):
+		strain_layout = QVBoxLayout()
+		#
+		strain_layout.addWidget(QLabel('Triangulation'))
+		self.textbox_maxlength = setup_textbox(
+							self.strain_textbox_select,
+							strain_layout, 'Max Length:')
+		self.button_triangulate = setup_button(
+							self.triangulate,
+							strain_layout, 'Triangulate')
+		self.button_save_lengths = setup_button(
+							self.export_lengths,
+							strain_layout, 'Export Lengths')
+		
+		strain_layout.addStretch()
+		#
+		self.setup_strain_textboxes()
+		#
+		return strain_layout
 	
 	def setup_colours_layout (self):
 		self.colours_layout = QVBoxLayout()
@@ -1151,6 +1297,23 @@ class Window(QWidget):
 										minimum_value = 0,
 										maximum_value = 12)
 	
+	def setup_strain_textboxes (self):
+		self.textbox_maxlength.setText(str(self.max_length))
+	
+	def strain_textbox_select (self):
+		self.max_length = get_textbox(self.textbox_maxlength,
+										minimum_value = 0,
+										maximum_value = 240)
+	
+	def channel_select (self, index):
+		self.channel = index
+	
+	def reset_channel_selector (self):
+		self.channel_selector.clear()
+		self.channel_selector.addItems(self.channel_names)
+		self.channel_selector.setCurrentIndex(0)
+		self.channel = 0
+	
 	def zoom_checkbox (self):
 		self.zoomed = self.checkbox_zoom.isChecked()
 		self.canvas.set_zoom(self.zoomed)
@@ -1189,7 +1352,7 @@ class Window(QWidget):
 					distances = np.linalg.norm(self.track_points - \
 											   self.position, axis=1)
 					closest = np.argmin(distances)
-					if distances[closest] > self.neighbourhood_size * 2:
+					if distances[closest] > self.neighbourhood_size:
 						self.track_points = np.append(self.track_points,
 													  [self.position],
 														axis=0)
@@ -1250,8 +1413,11 @@ class Window(QWidget):
 		if self.process_running:
 			display_error('Cannot change file while processing!')
 		elif self.file_dialog():
-			if self.file_path.suffix.lower() == '.zip':
-				self.image_stack = zip_tiff_stack(self.file_path)
+			if self.file_path.suffix.lower() == '.tif' or \
+					self.file_path.suffix.lower() == '.tiff':
+				self.image_stack = single_tif_stack(self.file_path)
+			elif self.file_path.suffix.lower() == '.zip':
+				self.image_stack = zip_tif_stack(self.file_path)
 			elif self.file_path is not None:
 				self.image_stack = AICSImage(str(self.file_path))
 			image_shape = self.image_stack.shape
@@ -1277,8 +1443,12 @@ class Window(QWidget):
 						  maximum_value = self.t_size-1)
 			update_slider(self.slider_z, value = self.z_position,
 						   maximum_value = self.z_size-1)
+			self.edges = np.zeros((0,2), dtype = int)
+			self.triangles = np.zeros((0,2), dtype = int)
 			self.refresh_image()
 			self.update_points()
+			self.update_edges()
+			self.reset_channel_selector()
 			self.instruction_text.setText('Use "focus" tab to setup ' + \
 										  'working area and "points" ' + \
 										  'tab to choose points to track.')
@@ -1288,6 +1458,7 @@ class Window(QWidget):
 		options |= QFileDialog.DontUseNativeDialog
 		file_name, _ = QFileDialog.getOpenFileName(self,
 								'Open Microscope File', '',
+								'TIF Files (*.tif);;' + \
 								'ZIP Files (*.zip);;' + \
 								'CZI Files (*.czi);;' + \
 								'ND2 Files (*.nd2);;' + \
@@ -1299,6 +1470,7 @@ class Window(QWidget):
 			file_path = Path(file_name)
 			if file_path.suffix.lower() == '.nd2' or \
 			   file_path.suffix.lower() == '.czi' or \
+			   file_path.suffix.lower() == '.tif' or \
 			   file_path.suffix.lower() == '.zip':
 				self.file_path = file_path
 				return True
@@ -1339,6 +1511,11 @@ class Window(QWidget):
 				shifts = np.zeros_like(self.track_points)
 		self.canvas.update_points(self.track_points, shifts, self.bad_points)
 	
+	def update_edges (self, edges = None):
+		if edges is not None:
+			self.edges = edges
+		self.canvas.update_edges(self.edges)
+	
 	def make_grid (self):
 		x_values = np.linspace(self.x_lower, self.x_upper,
 							   self.grid_number_x, endpoint = True,
@@ -1353,8 +1530,13 @@ class Window(QWidget):
 		self.update_points()
 	
 	def find_points (self):
-		frame = self.image_array[self.y_lower:self.y_upper,
-								 self.x_lower:self.x_upper]
+		if len(self.image_array.shape) == 2:
+			frame = self.image_array[self.y_lower:self.y_upper,
+									 self.x_lower:self.x_upper]
+		else:
+			frame = self.image_array[self.y_lower:self.y_upper,
+									 self.x_lower:self.x_upper,
+									 self.channel]
 		centres = find_centres(frame,
 							   self.neighbourhood_size,
 							   self.threshold_difference,
@@ -1580,22 +1762,33 @@ class Window(QWidget):
 		clear_progress_bar(self.progress_bar)
 		self.process_running = False
 	
+	def triangulate (self):
+		if len(self.track_points) > 3:
+			self.edges, self.triangles = triangulate(self.track_points,
+													 self.max_length)
+		self.update_edges()
+	
+	def export_lengths (self):
+		if len(self.edges) > 0 and len(self.track_points) > 0:
+			lengths = np.linalg.norm(
+					self.track_points[self.edges[:,0],:] - \
+					self.track_points[self.edges[:,1],:], axis=-1)
+			if self.file_path is not None:
+				np.savetxt(self.file_path.with_suffix(
+					'.{0:s}.lengths.csv'.format(
+									time.strftime("%Y.%m.%d-%H.%M.%S"))),
+					lengths,  delimiter = ',')
+	
 	def save_csv (self):
 		if not (self.coarse_search_done or self.fine_search_done):
 			self.instruction_text.setText('Must do some tracking first.')
 			return
 	#	results = np.around(self.fine_results).astype(int) + \
 	#								self.track_points[np.newaxis,:,:]
-		results_shape = self.fine_results.shape
-		results_shape = list(results_shape)
-		results_shape[0] += 1
-		results_shape = tuple(results_shape)
-		results = np.zeros(results_shape, dtype = float)
-		results[0] = self.track_points[:,:].astype(float)
-		results[1:] = self.fine_results + \
+		results = self.fine_results + \
 							self.track_points[np.newaxis,:,:].astype(float)
 		if len(self.coarse_results) == len(self.fine_results):
-			results[1:] += self.coarse_results[:,np.newaxis,:]
+			results += self.coarse_results[:,np.newaxis,:]
 		results = results*self.scale[0:2]
 		output_array = np.zeros((results.shape[0]*results.shape[1],5),
 								dtype = float)
