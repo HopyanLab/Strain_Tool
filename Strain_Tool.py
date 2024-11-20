@@ -12,6 +12,7 @@ matplotlib.use('Qt5Agg')
 #from matplotlib import pyplot as plt
 from scipy import ndimage as ndi # ndi.fourier_shift
 from scipy.signal import windows, correlate2d
+from scipy.interpolate import griddata
 from matplotlib.backend_bases import MouseButton
 from matplotlib.backends.backend_qt5agg import (
 					FigureCanvasQTAgg as FigureCanvas,
@@ -40,6 +41,7 @@ from pathlib import Path
 from aicsimageio import AICSImage
 from zipfile import ZipFile
 from PIL import Image
+from ffmpeg import FFmpeg
 #from aicspylibczi import CziFile
 #from nd2reader import ND2Reader
 #from imaris_ims_file_reader.ims import ims
@@ -181,7 +183,6 @@ class single_tif_stack:
 		self.tif_image = Image.open(tif_file_path)
 		self.image_array = np.array(self.tif_image)
 		self.shape = self.image_array.shape
-		print(self.shape)
 		if len(self.shape) == 3 and self.shape[2]>2:
 			self.channel_names = np.array(['red','green','blue'])
 		else:
@@ -308,7 +309,6 @@ def get_shift_ski (image_1, image_2, window = None):
 	return -shift[::-1]
 
 def get_shift_fft (image_1, image_2, window = None):
-	print(shifted)
 	image_1 = prepare_image(image_1.astype(float))
 	image_2 = prepare_image(image_2.astype(float))
 	if window is not None:
@@ -602,17 +602,22 @@ class MPLCanvas(FigureCanvas):
 		self.drift_changed = False
 		self.focus_box = None # np.array([[x_0, x_1], [y_0, y_1]])
 		self.edges = np.zeros((0,2), dtype = int)
+		self.triangles = np.zeros((0,3), dtype = int)
+		self.strains = np.zeros((0), dtype = float)
+		self.strain_max = 0
 		# plot objects
 		self.image_plot = None
 		self.box_plot = None
 		self.points_plot = None
 		self.edge_plot = None
+		self.strain_plot = None
 		self.bad_points_plot = None
 		self.select_box = None
 		# boolean flags
 		self.show_box = False
 		self.show_points = False
 		self.show_edges = True
+		self.show_strain = False
 		# colour choices
 		self.colormap = 'afmhot'
 		self.marker_color = 'white' # 'blue'
@@ -620,6 +625,35 @@ class MPLCanvas(FigureCanvas):
 		#
 		self.zoomed = False
 		self.flip_vertical = False
+	
+	def clear_canvas (self):
+		# stuff to plot
+		self.image_array = np.array([[0]], dtype = int)
+		self.track_points = np.zeros((0,2), dtype = int)
+		self.bad_points = np.zeros((0), dtype = int)
+		self.points_adjust = np.zeros((0,2), dtype = int)
+		self.drift_adjust = np.array([0,0], dtype = int)
+		self.drift_changed = False
+		self.focus_box = None # np.array([[x_0, x_1], [y_0, y_1]])
+		self.edges = np.zeros((0,2), dtype = int)
+		self.triangles = np.zeros((0,3), dtype = int)
+		self.strains = np.zeros((0), dtype = float)
+		self.strain_min = 0
+		self.strain_max = 0
+		# plot objects
+		self.remove_plot_element(self.image_plot)
+		self.remove_plot_element(self.box_plot)
+		self.remove_plot_element(self.points_plot)
+		self.remove_plot_element(self.edge_plot)
+		self.remove_plot_element(self.strain_plot)
+		self.remove_plot_element(self.bad_points_plot)
+		self.select_box = None
+		# boolean flags
+		self.show_box = False
+		self.show_points = False
+		self.show_edges = True
+		self.show_strain = False
+		self.draw()
 	
 	def set_flip (self, flip_vertical = False):
 		self.flip_vertical = flip_vertical
@@ -630,6 +664,10 @@ class MPLCanvas(FigureCanvas):
 		self.zoomed = zoomed
 		self.set_bounds()
 		self.draw()
+	
+	def set_stain_overlay (self, show_strain = False):
+		self.show_strain = show_strain
+		self.plot_strain()
 	
 	def set_bounds (self):
 		if self.zoomed and self.focus_box is not None:
@@ -669,6 +707,16 @@ class MPLCanvas(FigureCanvas):
 		self.edges = edges
 		self.plot_edges()
 	
+	def update_triangles (self, triangles = np.zeros((0,3), dtype = int)):
+		self.triangles = triangles
+	
+	def update_strains (self, strains = np.zeros(0, dtype = float),
+							strain_max=0):
+		if strains is not None:
+			self.strains = strains
+			self.strain_max = strain_max
+		self.plot_strain()
+	
 	def update_focus_box (self, focus_box):
 		self.focus_box = focus_box
 		self.plot_box()
@@ -684,12 +732,12 @@ class MPLCanvas(FigureCanvas):
 		self.remove_plot_element(self.image_plot)
 	#	self.ax.set_xlim(left = 0, right = self.image_array.shape[1])
 	#	self.ax.set_ylim(bottom = 0, top = self.image_array.shape[0])
-		if len(self.image_array.shape) == 2:
+		if len(self.image_array.shape) == 3 and self.image_array.shape[-1] > 1:
 			self.image_plot = self.ax.imshow(self.image_array,
-											 cmap = self.colormap,
 											 zorder = 1)
 		else:
 			self.image_plot = self.ax.imshow(self.image_array,
+											 cmap = self.colormap,
 											 zorder = 1)
 		if self.drift_changed:
 			self.plot_box()
@@ -718,7 +766,7 @@ class MPLCanvas(FigureCanvas):
 											marker = 'x',
 											markersize = 4.,
 											alpha = self.marker_alpha,
-											zorder = 3)
+											zorder = 4)
 			if len(self.bad_points) > 0:
 				self.bad_points_plot = self.ax.plot(track_points[
 														self.bad_points,0],
@@ -729,7 +777,7 @@ class MPLCanvas(FigureCanvas):
 													marker = 'o',
 													markersize = 3.,
 													alpha = 0.5,
-													zorder = 4)
+													zorder = 5)
 		else:
 			self.points_plot = None
 			self.bad_points_plot = None
@@ -738,14 +786,49 @@ class MPLCanvas(FigureCanvas):
 	def plot_edges (self):
 		self.remove_plot_element(self.edge_plot)
 		if self.show_edges and len(self.edges) > 0:
-			self.edge_plot = self.ax.plot(self.track_points[self.edges.T,0],
-										  self.track_points[self.edges.T,1],
+			track_points = self.track_points + [self.drift_adjust]
+			if len(self.points_adjust) == len(self.track_points):
+				track_points += self.points_adjust
+			self.edge_plot = self.ax.plot(track_points[self.edges.T,0],
+										  track_points[self.edges.T,1],
 										  color = 'gray',
 										  linestyle = '-',
 										  linewidth = 1,
 										  alpha = 0.8,
-										  zorder = 2)
-		print(self.edge_plot)
+										  zorder = 4)
+		self.draw()
+	
+	def plot_strain (self):
+		self.remove_plot_element(self.strain_plot)
+		if self.show_strain and len(self.strains) > 0 and \
+								len(self.triangles) > 0 and \
+								len(self.strains) == len(self.track_points):
+			points = self.track_points + [self.drift_adjust]
+			if len(self.points_adjust) == len(self.track_points):
+				points += self.points_adjust
+			colormap = plt.get_cmap('coolwarm')
+			norm = plt.Normalize(self.strain_min, self.strain_max)
+			colors = colormap(norm(self.strains))
+			self.strain_plot = []
+			for tri_index, triangle in enumerate(self.triangles):
+				try:
+					grid_x, grid_y = np.mgrid[
+						points[triangle][:,0].min():\
+								points[triangle][:,0].max():20j,
+						points[triangle][:,1].min():\
+								points[triangle][:,1].max():20j]
+					grid_z = griddata(points[triangle], self.strains[triangle],
+									(grid_x, grid_y), method='cubic')
+					tri_plot = self.ax.pcolormesh(
+								grid_x, grid_y, grid_z,
+								cmap = colormap,
+								vmin = -self.strain_max,
+								vmax = self.strain_max,
+								shading = 'auto',
+								zorder = 3)
+					self.strain_plot.append(tri_plot)
+				except:
+					pass
 		self.draw()
 	
 	def plot_box (self):
@@ -769,7 +852,7 @@ class MPLCanvas(FigureCanvas):
 										 linestyle='-',
 										 linewidth = 1,
 										 alpha = 0.8,
-										 zorder = 4)
+										 zorder = 6)
 		else:
 			self.box_plot = None
 		self.draw()
@@ -783,7 +866,7 @@ class MPLCanvas(FigureCanvas):
 									color = 'white',
 									linestyle = '-',
 									linewidth = 1,
-									zorder = 5)
+									zorder = 7)
 		self.draw()
 	
 	def remove_selector (self):
@@ -853,11 +936,13 @@ class Window(QWidget):
 		self.channel = None
 		self.channel_names = None
 		self.zoomed = False
+		self.strain_direction = None
+		self.show_strain = False
 		#
 		self.grid_defaults = np.array([8,8])
 		self.grid_number_x = self.grid_defaults[0]
 		self.grid_number_y = self.grid_defaults[1]
-		self.centres_defaults = np.array([24,1,8])
+		self.centres_defaults = np.array([24,1,2])
 		self.neighbourhood_size = self.centres_defaults[0]
 		self.threshold_difference = self.centres_defaults[1]
 		self.gauss_deviation = self.centres_defaults[2]
@@ -874,10 +959,12 @@ class Window(QWidget):
 		self.coarse_results = None
 		self.fine_search_done = False
 		self.fine_results = None
+		self.strains_done = False
 		#
 		self.max_length = 0
 		self.edges = np.zeros((0,2), dtype = int)
 		self.triangles = np.zeros((0,2), dtype = int)
+		self.strains = np.zeros((0,0,3), dtype = float)
 		#
 		self.process_running = False
 		self.coarse_tracking = False
@@ -895,6 +982,20 @@ class Window(QWidget):
 		self.coarse_gaussian = self.search_defaults[0]
 		self.fine_gaussian = self.search_defaults[1]
 		self.search_distance = self.search_defaults[2]
+	
+	def clear_analysis (self):
+		self.track_points = np.zeros((0,2), dtype = int)
+		self.bad_points = np.array([], dtype = int)
+		self.coarse_search_done = False
+		self.coarse_results = None
+		self.fine_search_done = False
+		self.fine_results = None
+		self.strains_done = False
+		self.max_length = 0
+		self.edges = np.zeros((0,2), dtype = int)
+		self.triangles = np.zeros((0,2), dtype = int)
+		self.strains = np.zeros((0,0,3), dtype = float)
+		#TODO reset canvas variables
 	
 	def setupGUI (self):
 		self.setWindowTitle(self.title)
@@ -1143,7 +1244,22 @@ class Window(QWidget):
 		self.button_save_lengths = setup_button(
 							self.export_lengths,
 							strain_layout, 'Export Lengths')
-		
+		#
+		strain_layout.addStretch()
+		horizontal_separator(strain_layout, self.palette())
+		#
+		strain_layout.addWidget(QLabel('Strain Analysis'))
+		self.button_compute_strains = setup_button(
+							self.compute_strains,
+							strain_layout, 'Compute Strains')
+		self.strain_selector = setup_combobox(
+							self.strain_select,
+							strain_layout, 'Strain Display:')
+		self.checkbox_strain = setup_checkbox(
+							self.strain_checkbox,
+							strain_layout, 'show strain',
+							self.show_strain)
+		#
 		strain_layout.addStretch()
 		#
 		self.setup_strain_textboxes()
@@ -1157,22 +1273,25 @@ class Window(QWidget):
 	def setup_bottom_layout (self):
 		bottom_layout = QHBoxLayout()
 		self.button_open_file = setup_button(
-					 self.open_file,
-					 bottom_layout, 'Open File')
+					self.open_file,
+					bottom_layout, 'Open File')
 		self.button_reset = setup_button(
-					 self.reset_defaults,
-					 bottom_layout, 'Reset Defaults')
+					self.reset_defaults,
+					bottom_layout, 'Reset Defaults')
 		self.progress_bar = setup_progress_bar(bottom_layout)
 		self.button_cancel = setup_button(
-					 self.cancel_tracking,
-					 bottom_layout, 'Cancel' + \
+					self.cancel_tracking,
+					bottom_layout, 'Cancel' + \
 								' (TODO)')
 		self.button_save_csv = setup_button(
-					 self.save_csv,
-					 bottom_layout, 'Save CSV')
+					self.save_csv,
+					bottom_layout, 'Save CSV')
 		self.button_save_frames = setup_button(
-					 self.save_frames,
-					 bottom_layout, 'Save Frames')
+					self.save_frames,
+					bottom_layout, 'Save Frames')
+		self.button_save_video = setup_button(
+					self.save_video,
+					bottom_layout, 'Save Video')
 		return bottom_layout
 	
 	def t_slider_select (self):
@@ -1308,11 +1427,21 @@ class Window(QWidget):
 	def channel_select (self, index):
 		self.channel = index
 	
+	def strain_select (self, index):
+		self.strain_direction = index
+		self.update_strains()
+	
 	def reset_channel_selector (self):
 		self.channel_selector.clear()
 		self.channel_selector.addItems(self.channel_names)
 		self.channel_selector.setCurrentIndex(0)
 		self.channel = 0
+	
+	def reset_strain_direction (self):
+		self.strain_selector.clear()
+		self.strain_selector.addItems(np.array(['XX','YY','XY']))
+		self.strain_selector.setCurrentIndex(0)
+		self.strain_direction = 0
 	
 	def zoom_checkbox (self):
 		self.zoomed = self.checkbox_zoom.isChecked()
@@ -1322,7 +1451,12 @@ class Window(QWidget):
 		flipped = self.checkbox_flip.isChecked()
 		self.canvas.set_flip(flipped)
 	
+	def strain_checkbox (self):
+		self.show_strain = self.checkbox_strain.isChecked()
+		self.canvas.set_stain_overlay(self.show_strain)
+	
 	def select_bounds (self):
+		self.clear_analysis()
 		self.zoomed = False
 		self.checkbox_zoom.setChecked(False)
 		self.selecting_area = True
@@ -1443,12 +1577,13 @@ class Window(QWidget):
 						  maximum_value = self.t_size-1)
 			update_slider(self.slider_z, value = self.z_position,
 						   maximum_value = self.z_size-1)
-			self.edges = np.zeros((0,2), dtype = int)
-			self.triangles = np.zeros((0,2), dtype = int)
+			self.canvas.clear_canvas()
+			self.clear_analysis()
 			self.refresh_image()
 			self.update_points()
 			self.update_edges()
 			self.reset_channel_selector()
+			self.reset_strain_direction()
 			self.instruction_text.setText('Use "focus" tab to setup ' + \
 										  'working area and "points" ' + \
 										  'tab to choose points to track.')
@@ -1458,10 +1593,10 @@ class Window(QWidget):
 		options |= QFileDialog.DontUseNativeDialog
 		file_name, _ = QFileDialog.getOpenFileName(self,
 								'Open Microscope File', '',
-								'TIF Files (*.tif);;' + \
-								'ZIP Files (*.zip);;' + \
 								'CZI Files (*.czi);;' + \
 								'ND2 Files (*.nd2);;' + \
+								'ZIP Files (*.zip);;' + \
+								'TIF Files (*.tif);;' + \
 								'All Files (*)',
 								options=options)
 		if file_name == '':
@@ -1495,6 +1630,8 @@ class Window(QWidget):
 			drift_adjust = np.array([0.,0.])
 		self.canvas.update_image(self.image_array, drift_adjust)
 		self.update_points()
+		self.update_edges()
+		self.update_strains()
 	
 	def update_points (self, points = None, bad_points = None):
 		if points is not None:
@@ -1516,6 +1653,24 @@ class Window(QWidget):
 			self.edges = edges
 		self.canvas.update_edges(self.edges)
 	
+	def update_triangles (self, triangles = None):
+		if triangles is not None:
+			self.triangles = triangles
+		self.canvas.update_triangles(self.triangles)
+	
+	def update_strains (self):
+		if self.strains_done and self.t_position > self.t_lower and \
+				self.t_position < self.t_upper and \
+				len(self.strains) == self.t_upper - self.t_lower:
+			max_val = np.amax(
+				[-np.amin(self.strains[:,:,self.strain_direction]),
+				  np.amax(self.strains[:,:,self.strain_direction])])
+			self.canvas.update_strains(
+						self.strains[self.t_position-self.t_lower,:,
+										self.strain_direction], max_val)
+		else:
+			self.canvas.update_strains(None)
+	
 	def make_grid (self):
 		x_values = np.linspace(self.x_lower, self.x_upper,
 							   self.grid_number_x, endpoint = True,
@@ -1530,6 +1685,7 @@ class Window(QWidget):
 		self.update_points()
 	
 	def find_points (self):
+		self.clear_analysis()
 		if len(self.image_array.shape) == 2:
 			frame = self.image_array[self.y_lower:self.y_upper,
 									 self.x_lower:self.x_upper]
@@ -1584,6 +1740,9 @@ class Window(QWidget):
 		self.track_points = np.zeros((0,2), dtype = int)
 		self.bad_points = np.zeros(0, dtype = int)
 		self.update_points()
+		self.edges = np.zeros((0,2), dtype = int)
+		self.triangles = np.zeros((0,2), dtype = int)
+		self.update_edges()
 	
 	def track_coarse (self, tracking_method = 'ski'):
 		if self.process_running:
@@ -1767,6 +1926,49 @@ class Window(QWidget):
 			self.edges, self.triangles = triangulate(self.track_points,
 													 self.max_length)
 		self.update_edges()
+		self.update_triangles()
+	
+	def compute_strains (self):
+		if len(self.triangles) == 0 or len(self.track_points) == 0:
+			return
+		if not (self.fine_search_done and self.fine_results is not None and \
+				len(self.fine_results) == self.t_upper-self.t_lower):
+			self.instruction_text.setText('Must do some tracking first.')
+			return
+		results = self.fine_results + \
+							self.track_points[np.newaxis,:,:].astype(float)
+		if self.coarse_search_done and \
+				len(self.coarse_results) == len(self.fine_results):
+			results += self.coarse_results[:,np.newaxis,:]
+		results = np.insert(results, 0, self.track_points, axis=0)
+		self.strains = np.zeros((self.t_upper - self.t_lower,
+									len(self.track_points),3), dtype = float)
+		update_progress_bar(self.progress_bar, value = self.t_lower,
+							minimum_value = self.t_lower,
+							maximum_value = self.t_upper,
+							text = 'Computing Strains: %p%')
+		for t in np.arange(self.t_lower, self.t_upper):
+			areas = np.zeros((len(self.track_points)), dtype = float)
+			t_index = t - self.t_lower
+			update_progress_bar(self.progress_bar, value = t)
+			for tri_index,triangle in enumerate(self.triangles):
+				tri_1 = results[t_index,triangle,:]
+				tri_2 = results[t_index+1,triangle,:]
+				tri_strain = np.array(compute_strain(tri_1, tri_2))
+				area = np.abs(tri_1[0,0]*(tri_1[1,1]-tri_1[2,1]) + \
+							  tri_1[1,0]*(tri_1[2,1]-tri_1[0,1]) + \
+							  tri_1[2,0]*(tri_1[0,1]-tri_1[1,1]))/2
+				self.strains[t_index,triangle,:] += tri_strain * area
+				areas[triangle] += area
+			self.strains[t_index,areas!=0,:] /= areas[areas!=0, np.newaxis]
+		for time in np.arange(1,len(self.strains)):
+			self.strains[time] += self.strains[time-1]
+		self.strains_done = True
+		clear_progress_bar(self.progress_bar)
+		self.checkbox_strain.setChecked(True)
+		self.strain_checkbox()
+		self.update_strains()
+		self.refresh_image()
 	
 	def export_lengths (self):
 		if len(self.edges) > 0 and len(self.track_points) > 0:
@@ -1787,28 +1989,63 @@ class Window(QWidget):
 	#								self.track_points[np.newaxis,:,:]
 		results = self.fine_results + \
 							self.track_points[np.newaxis,:,:].astype(float)
-		if len(self.coarse_results) == len(self.fine_results):
+		if self.coarse_search_done and \
+				len(self.coarse_results) == len(self.fine_results):
 			results += self.coarse_results[:,np.newaxis,:]
 		results = results*self.scale[0:2]
-		output_array = np.zeros((results.shape[0]*results.shape[1],5),
-								dtype = float)
-		counter = 1
-		for time_point in range(results.shape[0]):
+		if self.strains_done and len(self.strains) == len(results):
+			data_format = '%.18e', '%.18e', '%1d', '%1d', '%1d',\
+											'%.18e', '%.18e', '%.18e'
+			header = 'X,Y,Time,TrackID,ID,StrainXX,StrainYY,StrainXY'
+			output_array = np.zeros(((results.shape[0]+1)*results.shape[1],8),
+																dtype = float)
+			counter = 1
 			for point in range(results.shape[1]):
-				output_array[time_point*results.shape[1]+point] = [
-						results[time_point,point,0],
-						results[time_point,point,1],
-						time_point+1, point+1, counter]
+				output_array[point] = [
+							self.track_points[point,0],
+							self.track_points[point,1],
+							0, point+1, counter, 0, 0, 0]
 				counter += 1
-		data_format = '%.18e', '%.18e', '%1d', '%1d', '%1d'
+			for time_point in range(results.shape[0]):
+				for point in range(results.shape[1]):
+					output_array[(time_point+1)*results.shape[1]+point] = [
+							results[time_point,point,0],
+							results[time_point,point,1],
+							time_point+1, point+1, counter,
+							self.strains[time_point,point,0],
+							self.strains[time_point,point,1],
+							self.strains[time_point,point,2]]
+					counter += 1
+		else:
+			data_format = '%.18e', '%.18e', '%1d', '%1d', '%1d'
+			header = 'X,Y,Time,TrackID,ID'
+			output_array = np.zeros(((results.shape[0]+1)*results.shape[1],5),
+																dtype = float)
+			counter = 1
+			for point in range(results.shape[1]):
+				output_array[point] = [
+							self.track_points[point,0],
+							self.track_points[point,1],
+							0, point+1, counter]
+				counter += 1
+			for time_point in range(results.shape[0]):
+				for point in range(results.shape[1]):
+					output_array[(time_point+1)*results.shape[1]+point] = [
+							results[time_point,point,0],
+							results[time_point,point,1],
+							time_point+1, point+1, counter]
+					counter += 1
 		if self.file_path is not None:
 			np.savetxt(self.file_path.with_suffix(
 				'.{0:s}.csv'.format(time.strftime("%Y.%m.%d-%H.%M.%S"))),
 				output_array,  delimiter = ',',
 				fmt = data_format,
-				header = 'X,Y,Time,TrackID,ID')
+				header = header)
 	
 	def save_frames (self):
+		dir_path = self.file_path.with_suffix(
+					'.{0:s}'.format(time.strftime("%Y.%m.%d-%H.%M.%S")))
+		Path.mkdir(dir_path)
 		initial_time = self.t_position
 		for index, current_time in enumerate(
 									range(self.t_lower, self.t_upper+1)):
@@ -1817,10 +2054,16 @@ class Window(QWidget):
 			current_frame = copy.deepcopy(self.canvas.fig)
 			current_frame.axes[0].get_xaxis().set_visible(False)
 			current_frame.axes[0].get_yaxis().set_visible(False)
-			current_frame.savefig(self.file_path.with_suffix(f'.{index:d}.png'),
+			current_frame.savefig(dir_path/\
+					self.file_path.with_suffix(f'.{index:d}.png').name,
 									bbox_inches='tight',pad_inches = 0)
 		self.t_position = initial_time
 		self.refresh_image()
+		return dir_path
+	
+	def save_video (self):
+		dir_path = self.save_frames()
+		#TODO
 
 ################################################################################
 
