@@ -3,6 +3,7 @@
 import sys
 import time
 import copy
+import subprocess
 import numpy as np
 import mahotas as mh
 from scipy.spatial import Delaunay
@@ -20,6 +21,7 @@ from matplotlib.backends.backend_qt5agg import (
 							)
 from matplotlib.figure import Figure
 from matplotlib.colors import LinearSegmentedColormap
+from matplotlib.colors import ListedColormap
 from matplotlib import colors, ticker, cm
 from matplotlib.collections import LineCollection
 from mpl_toolkits.mplot3d.axes3d import Axes3D
@@ -41,7 +43,6 @@ from pathlib import Path
 from aicsimageio import AICSImage
 from zipfile import ZipFile
 from PIL import Image
-from ffmpeg import FFmpeg
 #from aicspylibczi import CziFile
 #from nd2reader import ND2Reader
 #from imaris_ims_file_reader.ims import ims
@@ -619,7 +620,7 @@ class MPLCanvas(FigureCanvas):
 		self.show_edges = True
 		self.show_strain = False
 		# colour choices
-		self.colormap = 'afmhot'
+		self.colormap = 'Greys_r' #'afmhot'
 		self.marker_color = 'white' # 'blue'
 		self.marker_alpha = 0.8
 		#
@@ -653,6 +654,7 @@ class MPLCanvas(FigureCanvas):
 		self.show_points = False
 		self.show_edges = True
 		self.show_strain = False
+		self.transparent_strain = True
 		self.draw()
 	
 	def set_flip (self, flip_vertical = False):
@@ -721,7 +723,7 @@ class MPLCanvas(FigureCanvas):
 		self.focus_box = focus_box
 		self.plot_box()
 	
-	def update_colors (self, colormap = 'afmhot',
+	def update_colors (self, colormap = 'Greys_r', #'afmhot'
 							 marker_color = 'white', # 'blue'
 							 marker_alpha = 0.8):
 		self.colormap = colormap
@@ -766,7 +768,7 @@ class MPLCanvas(FigureCanvas):
 											marker = 'x',
 											markersize = 4.,
 											alpha = self.marker_alpha,
-											zorder = 4)
+											zorder = 5)
 			if len(self.bad_points) > 0:
 				self.bad_points_plot = self.ax.plot(track_points[
 														self.bad_points,0],
@@ -777,7 +779,7 @@ class MPLCanvas(FigureCanvas):
 													marker = 'o',
 													markersize = 3.,
 													alpha = 0.5,
-													zorder = 5)
+													zorder = 6)
 		else:
 			self.points_plot = None
 			self.bad_points_plot = None
@@ -807,6 +809,14 @@ class MPLCanvas(FigureCanvas):
 			if len(self.points_adjust) == len(self.track_points):
 				points += self.points_adjust
 			colormap = plt.get_cmap('coolwarm')
+			if self.transparent_strain:
+				colormap_adj = colormap(np.arange(colormap.N))
+				colormap_adj[:,-1] = \
+					(2*np.abs(np.arange(colormap.N)-colormap.N/2)) /\
+									(colormap.N)
+				colormap_adj += 0.2
+				colormap_adj /= np.amax(colormap_adj)
+				colormap = ListedColormap(colormap_adj)
 			norm = plt.Normalize(self.strain_min, self.strain_max)
 			colors = colormap(norm(self.strains))
 			self.strain_plot = []
@@ -818,7 +828,7 @@ class MPLCanvas(FigureCanvas):
 						points[triangle][:,1].min():\
 								points[triangle][:,1].max():20j]
 					grid_z = griddata(points[triangle], self.strains[triangle],
-									(grid_x, grid_y), method='cubic')
+									(grid_x, grid_y), method='linear')
 					tri_plot = self.ax.pcolormesh(
 								grid_x, grid_y, grid_z,
 								cmap = colormap,
@@ -942,7 +952,7 @@ class Window(QWidget):
 		self.grid_defaults = np.array([8,8])
 		self.grid_number_x = self.grid_defaults[0]
 		self.grid_number_y = self.grid_defaults[1]
-		self.centres_defaults = np.array([24,1,2])
+		self.centres_defaults = np.array([36,1,3])
 		self.neighbourhood_size = self.centres_defaults[0]
 		self.threshold_difference = self.centres_defaults[1]
 		self.gauss_deviation = self.centres_defaults[2]
@@ -951,6 +961,7 @@ class Window(QWidget):
 		self.fine_gaussian = self.search_defaults[1]
 		self.search_distance = self.search_defaults[2]
 		self.tukey_alpha = 0.5 # None uses Hann window
+		self.max_length = 0
 		#
 		self.track_points = np.zeros((0,2), dtype = int)
 		self.bad_points = np.array([], dtype = int)
@@ -961,7 +972,6 @@ class Window(QWidget):
 		self.fine_results = None
 		self.strains_done = False
 		#
-		self.max_length = 0
 		self.edges = np.zeros((0,2), dtype = int)
 		self.triangles = np.zeros((0,2), dtype = int)
 		self.strains = np.zeros((0,0,3), dtype = float)
@@ -991,10 +1001,9 @@ class Window(QWidget):
 		self.fine_search_done = False
 		self.fine_results = None
 		self.strains_done = False
-		self.max_length = 0
 		self.edges = np.zeros((0,2), dtype = int)
 		self.triangles = np.zeros((0,2), dtype = int)
-		self.strains = np.zeros((0,0,3), dtype = float)
+		self.strains = np.zeros((0,0,4), dtype = float)
 		#TODO reset canvas variables
 	
 	def setupGUI (self):
@@ -1439,7 +1448,7 @@ class Window(QWidget):
 	
 	def reset_strain_direction (self):
 		self.strain_selector.clear()
-		self.strain_selector.addItems(np.array(['XX','YY','XY']))
+		self.strain_selector.addItems(np.array(['XX','YY','XY','VM']))
 		self.strain_selector.setCurrentIndex(0)
 		self.strain_direction = 0
 	
@@ -1942,7 +1951,7 @@ class Window(QWidget):
 			results += self.coarse_results[:,np.newaxis,:]
 		results = np.insert(results, 0, self.track_points, axis=0)
 		self.strains = np.zeros((self.t_upper - self.t_lower,
-									len(self.track_points),3), dtype = float)
+									len(self.track_points),4), dtype = float)
 		update_progress_bar(self.progress_bar, value = self.t_lower,
 							minimum_value = self.t_lower,
 							maximum_value = self.t_upper,
@@ -1953,16 +1962,21 @@ class Window(QWidget):
 			update_progress_bar(self.progress_bar, value = t)
 			for tri_index,triangle in enumerate(self.triangles):
 				tri_1 = results[t_index,triangle,:]
+				tri_1 = results[0,triangle,:]
 				tri_2 = results[t_index+1,triangle,:]
 				tri_strain = np.array(compute_strain(tri_1, tri_2))
+				tri_strain = np.append(tri_strain, np.sqrt(
+						tri_strain[0]**2 + tri_strain[1]**2 - \
+						tri_strain[0]*tri_strain[1] + \
+						3 * tri_strain[2]**2))
 				area = np.abs(tri_1[0,0]*(tri_1[1,1]-tri_1[2,1]) + \
 							  tri_1[1,0]*(tri_1[2,1]-tri_1[0,1]) + \
 							  tri_1[2,0]*(tri_1[0,1]-tri_1[1,1]))/2
 				self.strains[t_index,triangle,:] += tri_strain * area
 				areas[triangle] += area
 			self.strains[t_index,areas!=0,:] /= areas[areas!=0, np.newaxis]
-		for time in np.arange(1,len(self.strains)):
-			self.strains[time] += self.strains[time-1]
+	#	for time in np.arange(1,len(self.strains)):
+	#		self.strains[time] += self.strains[time-1]
 		self.strains_done = True
 		clear_progress_bar(self.progress_bar)
 		self.checkbox_strain.setChecked(True)
@@ -2047,6 +2061,10 @@ class Window(QWidget):
 					'.{0:s}'.format(time.strftime("%Y.%m.%d-%H.%M.%S")))
 		Path.mkdir(dir_path)
 		initial_time = self.t_position
+		update_progress_bar(self.progress_bar, value = self.t_lower,
+							minimum_value = self.t_lower,
+							maximum_value = self.t_upper,
+							text = 'Exporting Frames: %p%')
 		for index, current_time in enumerate(
 									range(self.t_lower, self.t_upper+1)):
 			self.t_position = current_time
@@ -2054,16 +2072,24 @@ class Window(QWidget):
 			current_frame = copy.deepcopy(self.canvas.fig)
 			current_frame.axes[0].get_xaxis().set_visible(False)
 			current_frame.axes[0].get_yaxis().set_visible(False)
-			current_frame.savefig(dir_path/\
-					self.file_path.with_suffix(f'.{index:d}.png').name,
+			current_frame.savefig(dir_path/(f'frame.{index:d}.png'),
 									bbox_inches='tight',pad_inches = 0)
+			update_progress_bar(self.progress_bar, value = current_time)
 		self.t_position = initial_time
 		self.refresh_image()
+		clear_progress_bar(self.progress_bar)
 		return dir_path
 	
 	def save_video (self):
 		dir_path = self.save_frames()
-		#TODO
+		command = ['ffmpeg',
+					'-nostdin',
+					'-framerate', '2',
+					'-i', str((dir_path/f'frame.%0d.png')),
+					'-c:v', 'libx264',
+					'-pix_fmt', 'yuv420p',
+					'movie.mp4']
+		subprocess.run(command)
 
 ################################################################################
 
