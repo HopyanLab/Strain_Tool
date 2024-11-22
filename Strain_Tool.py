@@ -1298,9 +1298,6 @@ class Window(QWidget):
 		self.button_save_frames = setup_button(
 					self.save_frames,
 					bottom_layout, 'Save Frames')
-		self.button_save_video = setup_button(
-					self.save_video,
-					bottom_layout, 'Save Video')
 		return bottom_layout
 	
 	def t_slider_select (self):
@@ -2079,17 +2076,6 @@ class Window(QWidget):
 		self.refresh_image()
 		clear_progress_bar(self.progress_bar)
 		return dir_path
-	
-	def save_video (self):
-		dir_path = self.save_frames()
-		command = ['ffmpeg',
-					'-nostdin',
-					'-framerate', '2',
-					'-i', str((dir_path/f'frame.%0d.png')),
-					'-c:v', 'libx264',
-					'-pix_fmt', 'yuv420p',
-					'movie.mp4']
-		subprocess.run(command)
 
 ################################################################################
 
