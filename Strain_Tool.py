@@ -40,9 +40,10 @@ from PyQt5.QtWidgets import (
 from skimage import data
 from skimage.registration import phase_cross_correlation
 from pathlib import Path
-from aicsimageio import AICSImage
 from zipfile import ZipFile
 from PIL import Image
+from bioio import BioImage
+#from aicsimageio import AICSImage
 #from aicspylibczi import CziFile
 #from nd2reader import ND2Reader
 #from imaris_ims_file_reader.ims import ims
@@ -952,7 +953,7 @@ class Window(QWidget):
 		self.grid_defaults = np.array([8,8])
 		self.grid_number_x = self.grid_defaults[0]
 		self.grid_number_y = self.grid_defaults[1]
-		self.centres_defaults = np.array([36,1,3])
+		self.centres_defaults = np.array([16,1,2])
 		self.neighbourhood_size = self.centres_defaults[0]
 		self.threshold_difference = self.centres_defaults[1]
 		self.gauss_deviation = self.centres_defaults[2]
@@ -1487,30 +1488,47 @@ class Window(QWidget):
 			   (self.position[1] > self.y_upper):
 				pass
 			elif event.button is MouseButton.LEFT:
-				if self.track_points is not None and \
-				   len(self.track_points) > 0:
-					distances = np.linalg.norm(self.track_points - \
-											   self.position, axis=1)
-					closest = np.argmin(distances)
-					if distances[closest] > self.neighbourhood_size:
-						self.track_points = np.append(self.track_points,
-													  [self.position],
-														axis=0)
-				else:
-					self.track_points = np.array([[0,0]], dtype = int)
-					self.track_points[0] = self.position
+				self.add_point()
 			elif event.button is MouseButton.RIGHT:
-				if self.track_points is not None:
-					if len(self.track_points) > 0:
-						distances = np.linalg.norm(self.track_points - \
-												   self.position, axis=1)
-						closest = np.argmin(distances)
-						if distances[closest] <= self.neighbourhood_size * 2:
-							self.track_points = np.delete(self.track_points,
-														  closest, axis=0)
-					if len(self.track_points) == 0:
-						self.track_points = None
-			self.update_points()
+				self.remove_point()
+	
+	def add_point (self):
+		if self.track_points is not None and \
+		   len(self.track_points) > 0:
+			distances = np.linalg.norm(self.track_points - \
+									   self.position, axis=1)
+			closest = np.argmin(distances)
+			if distances[closest] > self.neighbourhood_size:
+				self.track_points = np.append(self.track_points,
+											  [self.position],
+												axis=0)
+		else:
+			self.track_points = np.array([[0,0]], dtype = int)
+			self.track_points[0] = self.position
+		self.update_points()
+	
+	def remove_point (self):
+		if self.track_points is not None:
+			if len(self.track_points) > 0:
+				distances = np.linalg.norm(self.track_points - \
+										   self.position, axis=1)
+				closest = np.argmin(distances)
+				if distances[closest] <= self.neighbourhood_size * 2:
+					if self.fine_search_done:
+						if len(self.fine_results) == \
+									len(self.track_points):
+							self.fine_results = np.delete(
+													self.fine_results,
+													closest, axis=0)
+					if len(self.bad_points) > 0:
+						self.bad_points = np.delete(self.bad_points,
+								self.bad_points == closest, axis=0)
+						self.bad_points -= (self.bad_points > closest)
+					self.track_points = np.delete(self.track_points,
+												  closest, axis=0)
+			if len(self.track_points) == 0:
+				self.track_points = None
+		self.update_points()
 	
 	def mouse_moved (self, event):
 		if self.selecting_area:
@@ -1559,7 +1577,7 @@ class Window(QWidget):
 			elif self.file_path.suffix.lower() == '.zip':
 				self.image_stack = zip_tif_stack(self.file_path)
 			elif self.file_path is not None:
-				self.image_stack = AICSImage(str(self.file_path))
+				self.image_stack = BioImage(str(self.file_path))
 			image_shape = self.image_stack.shape
 			self.x_size = image_shape[4]
 			self.y_size = image_shape[3]
@@ -1691,7 +1709,13 @@ class Window(QWidget):
 		self.update_points()
 	
 	def find_points (self):
-		self.clear_analysis()
+		if self.coarse_search_done == True:
+			coarse_results = self.coarse_results
+			self.clear_analysis()
+			self.coarse_results = coarse_results
+			self.coarse_search_done = True
+		else:
+			self.claer_analysis()
 		if len(self.image_array.shape) == 2:
 			frame = self.image_array[self.y_lower:self.y_upper,
 									 self.x_lower:self.x_upper]
@@ -1737,6 +1761,10 @@ class Window(QWidget):
 		self.bad_points = bad_points
 	
 	def remove_bad_points (self):
+		if self.fine_search_done:
+			if len(self.fine_results) == len(self.track_points):
+				self.fine_results = np.delete(self.track_points,
+										self.bad_points, axis=0)
 		self.track_points = np.delete(self.track_points, self.bad_points,
 										axis=0)
 		self.bad_points = np.zeros(0, dtype = int)
@@ -1876,52 +1904,56 @@ class Window(QWidget):
 		full_image_1 = ndi.gaussian_filter(full_image_1,
 											self.fine_gaussian)
 	#	full_image_1 = ndi.spline_filter(full_image_1)
-		for t in np.arange(self.t_lower, self.t_upper):
-			t_index = t - self.t_lower
-			full_image_2 = get_image(self.image_stack,
-									 t+1,
-									 self.z_position,
-									 self.channel).astype(float)
-			full_image_2 = ndi.gaussian_filter(full_image_2,
-												self.fine_gaussian)
-		#	full_image_2 = ndi.spline_filter(full_image_2)
-			for p_index, o_point in enumerate(self.track_points):
-				point = o_point + np.around(results[p_index]).astype(int)
-				x_1_lower = point[0] - self.search_distance * 2
-				x_1_upper = point[0] + self.search_distance * 2
-				y_1_lower = point[1] - self.search_distance * 2
-				y_1_upper = point[1] + self.search_distance * 2
-				x_2_lower = point[0] - self.search_distance * 2
-				x_2_upper = point[0] + self.search_distance * 2
-				y_2_lower = point[1] - self.search_distance * 2
-				y_2_upper = point[1] + self.search_distance * 2
-				if self.coarse_search_done:
-					if len(self.coarse_results) == self.t_upper - \
-												   self.t_lower:
-						if t_index > 0:
-							int_result = np.around(
+		try:
+			for t in np.arange(self.t_lower, self.t_upper):
+				t_index = t - self.t_lower
+				full_image_2 = get_image(self.image_stack,
+										 t+1,
+										 self.z_position,
+										 self.channel).astype(float)
+				full_image_2 = ndi.gaussian_filter(full_image_2,
+													self.fine_gaussian)
+			#	full_image_2 = ndi.spline_filter(full_image_2)
+				for p_index, o_point in enumerate(self.track_points):
+					point = o_point + np.around(results[p_index]).astype(int)
+					x_1_lower = point[0] - self.search_distance * 2
+					x_1_upper = point[0] + self.search_distance * 2
+					y_1_lower = point[1] - self.search_distance * 2
+					y_1_upper = point[1] + self.search_distance * 2
+					x_2_lower = point[0] - self.search_distance * 2
+					x_2_upper = point[0] + self.search_distance * 2
+					y_2_lower = point[1] - self.search_distance * 2
+					y_2_upper = point[1] + self.search_distance * 2
+					if self.coarse_search_done:
+						if len(self.coarse_results) == self.t_upper - \
+													   self.t_lower:
+							if t_index > 0:
+								int_result = np.around(
 									self.coarse_results[t_index-1]).astype(int)
-							x_1_lower += int_result[0]
-							x_1_upper += int_result[0]
-							y_1_lower += int_result[1]
-							y_1_upper += int_result[1]
-						int_result = np.around(
+								x_1_lower += int_result[0]
+								x_1_upper += int_result[0]
+								y_1_lower += int_result[1]
+								y_1_upper += int_result[1]
+							int_result = np.around(
 									self.coarse_results[t_index]).astype(int)
-						x_2_lower += int_result[0]
-						x_2_upper += int_result[0]
-						y_2_lower += int_result[1]
-						y_2_upper += int_result[1]
-				image_1 = full_image_1[y_1_lower:y_1_upper+1,
-									   x_1_lower:x_1_upper+1]
-				image_2 = full_image_2[y_2_lower:y_2_upper+1,
-									   x_2_lower:x_2_upper+1]
-				results[p_index] += get_shift(image_1, image_2,
+							x_2_lower += int_result[0]
+							x_2_upper += int_result[0]
+							y_2_lower += int_result[1]
+							y_2_upper += int_result[1]
+					image_1 = full_image_1[y_1_lower:y_1_upper+1,
+										   x_1_lower:x_1_upper+1]
+					image_2 = full_image_2[y_2_lower:y_2_upper+1,
+										   x_2_lower:x_2_upper+1]
+					results[p_index] += get_shift(image_1, image_2,
 										tracking_method = tracking_method,
 										window = window,
 										search_distance = self.search_distance)
-			fine_results[t_index] = results
-			full_image_1 = full_image_2
-			update_progress_bar(self.progress_bar, value = t)
+				fine_results[t_index] = results
+				full_image_1 = full_image_2
+				update_progress_bar(self.progress_bar, value = t)
+		except Exception as error:
+			message = "An error occurred:"+type(error).__name__+"–"+str(error)
+			display_error(message)
 		self.fine_results = fine_results
 		self.fine_search_done = True
 		clear_progress_bar(self.progress_bar)
@@ -2054,6 +2086,8 @@ class Window(QWidget):
 				header = header)
 	
 	def save_frames (self):
+		if self.file_path is None:
+			return
 		dir_path = self.file_path.with_suffix(
 					'.{0:s}'.format(time.strftime("%Y.%m.%d-%H.%M.%S")))
 		Path.mkdir(dir_path)
