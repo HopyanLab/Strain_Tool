@@ -1932,13 +1932,13 @@ class Window(QWidget):
 				if distances[closest] <= self.neighbourhood_size * 2:
 					if self.fine_search_done:
 						if self.fine_results.shape[1] == \
-									len(self.track_points):
+									self.track_points.shape[0]:
 							self.fine_results = np.delete(
 													self.fine_results,
-													closest, axis=0)
+													closest, axis=1)
 					if self.fit_results_points is not None:
-						if len(self.fit_results_points) == \
-									len(self.track_points):
+						if self.fit_results_points.shape[0] == \
+									self.track_points.shape[0]:
 							self.fit_results_points = np.delete(
 													self.fit_results_points,
 													closest, axis=0)
@@ -2200,7 +2200,7 @@ class Window(QWidget):
 		if self.bad_points is None or len(self.bad_points) == 0:
 			return
 		if self.fine_search_done:
-			if len(self.fine_results) == len(self.track_points):
+			if self.fine_results.shape[1] == len(self.track_points):
 				self.fine_results = np.delete(self.fine_results,
 										self.bad_points, axis=1)
 		if self.fit_results_points is not None:
@@ -2805,6 +2805,8 @@ class Window(QWidget):
 ################################################################################
 
 if __name__ == "__main__":
+	QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+	QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
 	app = QApplication(sys.argv)
 	window = Window()
 	window.show()
