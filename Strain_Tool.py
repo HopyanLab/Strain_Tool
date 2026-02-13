@@ -928,11 +928,8 @@ class MPLCanvas(FigureCanvas):
 	def remove_plot_element (self, plot_element):
 		if plot_element is not None:
 			if isinstance(plot_element,list):
-				for line in plot_element:
-					try:
-						line.remove()
-					except:
-						pass
+				for sub_element in plot_element:
+					self.remove_plot_element(sub_element)
 			else:
 				try:
 					plot_element.remove()
@@ -1060,11 +1057,8 @@ class MPLPlot(FigureCanvas):
 	def remove_plot_element (self, plot_element):
 		if plot_element is not None:
 			if isinstance(plot_element,list):
-				for line in plot_element:
-					try:
-						line.remove()
-					except:
-						pass
+				for sub_element in plot_element:
+					self.remove_plot_element(sub_element)
 			else:
 				try:
 					plot_element.remove()
