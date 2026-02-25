@@ -479,18 +479,23 @@ def get_textbox (textbox,
 				 minimum_value = None,
 				 maximum_value = None,
 				 is_int = False):
-	if is_int:
-		value = int(np.floor(float(textbox.text())))
-	else:
-		value = float(textbox.text())
-	if maximum_value is not None:
-		if value > maximum_value:
-			value = maximum_value
-	if minimum_value is not None:
-		if value < minimum_value:
-			value = minimum_value
-	textbox.setText(str(value))
-	return value
+	try:
+		if is_int:
+			value = int(np.floor(float(textbox.text())))
+		else:
+			value = float(textbox.text())
+		if maximum_value is not None:
+			if value > maximum_value:
+				value = maximum_value
+		if minimum_value is not None:
+			if value < minimum_value:
+				value = minimum_value
+		textbox.setText(str(value))
+		return value
+	except Exception as error:
+		message = "An error occurred:"+type(error).__name__+"–"+str(error)
+		display_error(message)
+		return minimum_value
 
 def setup_button (function, layout, label_text, toggle = False):
 	button = QPushButton()
