@@ -45,6 +45,7 @@ from PyQt5.QtWidgets import (
 							)
 from skimage import data
 from skimage.registration import phase_cross_correlation
+#from cucim.skimage.registration import phase_cross_correlation
 from pathlib import Path
 from zipfile import ZipFile
 from PIL import Image
@@ -310,8 +311,11 @@ def get_shift (image_1, image_2, tracking_method = 'ski',
 
 def get_shift_ski (image_1, image_2, window = None):
 	shift, error, phase = phase_cross_correlation(image_1, image_2,
-												  upsample_factor=100,
+												  upsample_factor=200,
 												  normalization=None)
+#	print(shift)
+#	print(error)
+#	print(phase)
 	return -shift[::-1]
 
 def get_shift_fft (image_1, image_2, window = None):
@@ -422,7 +426,7 @@ def triangulate (points, max_length = None):
 	mean_length = np.mean(lengths)
 	if max_length is not None:
 		if max_length > 0:
-			edge_mask = (lengths < max_length)
+			edge_mask = np.logical_and(lengths < max_length, lengths>0)
 		else:
 			edge_mask = (lengths > 0)
 	else:
@@ -431,7 +435,7 @@ def triangulate (points, max_length = None):
 								edge_mask[num_triangles:2*num_triangles]),
 								edge_mask[2*num_triangles:3*num_triangles])
 	edges = np.sort(edges[edge_mask], axis=1)
-	edges = np.unique(edges, axis=0)
+	edges, counts = np.unique(edges, return_counts=True, axis=0)
 	triangles = triangles[triangle_mask]
 	return edges, triangles
 
@@ -448,7 +452,7 @@ def display_error (error_text = 'Something went wrong!'):
 	msg.exec_()
 
 def setup_textbox (function, layout, label_text,
-				   initial_value = 0, is_int = True):
+				   initial_value = 0, is_int = False):
 	textbox = QLineEdit()
 	need_inner = not isinstance(layout, QHBoxLayout)
 	if need_inner:
@@ -479,23 +483,18 @@ def get_textbox (textbox,
 				 minimum_value = None,
 				 maximum_value = None,
 				 is_int = False):
-	try:
-		if is_int:
-			value = int(np.floor(float(textbox.text())))
-		else:
-			value = float(textbox.text())
-		if maximum_value is not None:
-			if value > maximum_value:
-				value = maximum_value
-		if minimum_value is not None:
-			if value < minimum_value:
-				value = minimum_value
-		textbox.setText(str(value))
-		return value
-	except Exception as error:
-		message = "An error occurred:"+type(error).__name__+"–"+str(error)
-		display_error(message)
-		return minimum_value
+	if is_int:
+		value = int(np.floor(float(textbox.text())))
+	else:
+		value = float(textbox.text())
+	if maximum_value is not None:
+		if value > maximum_value:
+			value = maximum_value
+	if minimum_value is not None:
+		if value < minimum_value:
+			value = minimum_value
+	textbox.setText(str(value))
+	return value
 
 def setup_button (function, layout, label_text, toggle = False):
 	button = QPushButton()
@@ -617,6 +616,7 @@ class MPLCanvas(FigureCanvas):
 		self.image_array = np.array([[0]], dtype = int)
 		self.track_points = np.zeros((0,2), dtype = int)
 		self.bad_points = np.zeros((0), dtype = int)
+		self.excluded_points = np.zeros((0), dtype = int)
 		self.points_adjust = np.zeros((0,2), dtype = int)
 		self.drift_adjust = np.array([0,0], dtype = int)
 		self.drift_changed = False
@@ -722,11 +722,13 @@ class MPLCanvas(FigureCanvas):
 	def update_points (self, track_points = np.zeros((0,2), dtype = int),
 							 points_adjust = np.zeros((0,2), dtype = int),
 							 bad_points = np.zeros((0), dtype = int),
+							 excluded_points = np.zeros((0), dtype = int),
 							 selected_point = None):
 		points_adjust = np.around(points_adjust).astype(int)
 		self.track_points = track_points
 		self.points_adjust = points_adjust
 		self.bad_points = bad_points
+		self.excluded_points = excluded_points
 		self.selected_point = selected_point
 		self.plot_points()
 	
@@ -802,12 +804,23 @@ class MPLCanvas(FigureCanvas):
 														self.bad_points,0],
 													track_points[
 														self.bad_points,1],
-													color = 'fuchsia',
+													color = 'tab:red',
 													linestyle = '',
 													marker = 'o',
 													markersize = 3.,
 													alpha = 0.5,
 													zorder = 6)
+			if len(self.excluded_points) > 0:
+				self.bad_points_plot = self.ax.plot(track_points[
+														self.excluded_points,0],
+													track_points[
+														self.excluded_points,1],
+													color = 'fuchsia',
+													linestyle = '',
+													marker = 'o',
+													markersize = 3.,
+													alpha = 0.5,
+													zorder = 7)
 			if self.selected_point is not None:
 				if self.selected_point < len(track_points):
 					self.selected_point_plot = self.ax.plot(
@@ -903,7 +916,7 @@ class MPLCanvas(FigureCanvas):
 										 linestyle='-',
 										 linewidth = 1,
 										 alpha = 0.8,
-										 zorder = 6)
+										 zorder = 8)
 		else:
 			self.box_plot = None
 		self.draw()
@@ -917,7 +930,7 @@ class MPLCanvas(FigureCanvas):
 									color = 'white',
 									linestyle = '-',
 									linewidth = 1,
-									zorder = 7)
+									zorder = 8)
 		self.draw()
 	
 	def remove_selector (self):
@@ -1150,6 +1163,7 @@ class Window(QWidget):
 		#
 		self.track_points = np.zeros((0,2), dtype = int)
 		self.bad_points = np.array([], dtype = int)
+		self.excluded_points = np.array([], dtype = int)
 		self.selected_point = None
 		#
 		self.coarse_search_done = False
@@ -1185,6 +1199,7 @@ class Window(QWidget):
 	def clear_analysis (self):
 		self.track_points = np.zeros((0,2), dtype = int)
 		self.bad_points = np.array([], dtype = int)
+		self.excluded_points = np.array([], dtype = int)
 		self.coarse_search_done = False
 		self.coarse_results = None
 		self.fine_search_done = False
@@ -1451,7 +1466,7 @@ class Window(QWidget):
 							points_layout, 'Move Points',
 							toggle = True)
 		self.button_remove_bad = setup_button(
-							self.remove_bad_points,
+							self.remove_bad_points_button,
 							points_layout, 'Remove Bad')
 		self.button_clear_points = setup_button(
 							self.clear_points,
@@ -1549,12 +1564,25 @@ class Window(QWidget):
 		self.button_fit_points = setup_button(
 							self.fit_points,
 							strain_layout, 'Fit Points')
+		exclude_buttons_layout = QHBoxLayout()
+		self.button_exclude_points = setup_button(
+							self.exclude_points_button,
+							exclude_buttons_layout, 'Exclude',
+							toggle = True)
+		self.button_include_points = setup_button(
+							self.include_points_button,
+							exclude_buttons_layout, 'Include',
+							toggle = True)
+		strain_layout.addLayout(exclude_buttons_layout)
+		self.button_exclude_bad = setup_button(
+							self.exclude_bad_points,
+							strain_layout, 'Exclude Bad')
 		self.button_phase_plot = setup_button(
-							self.plot_phases,
-							strain_layout, 'Plot Phases')
-		self.button_derivatives_plot = setup_button(
-							self.plot_derivatives,
-							strain_layout, 'Plot Derivatives')
+							self.analyse_phases,
+							strain_layout, 'Analyse Phases')
+#		self.button_derivatives_plot = setup_button(
+#							self.plot_derivatives,
+#							strain_layout, 'Plot Derivatives')
 		#
 		strain_layout.addStretch()
 		horizontal_separator(strain_layout, self.palette())
@@ -1722,31 +1750,31 @@ class Window(QWidget):
 	def points_textbox_select (self):
 		self.grid_number_x = get_textbox(self.textbox_grid_x,
 										minimum_value = 0,
-										maximum_value = 24,
+										maximum_value = 48,
 										is_int = True)
 		self.grid_number_y = get_textbox(self.textbox_grid_y,
 										minimum_value = 0,
-										maximum_value = 24,
+										maximum_value = 48,
 										is_int = True)
 		self.neighbourhood_size = get_textbox(self.textbox_neighbourhood,
 										minimum_value = 0,
-										maximum_value = 60,
+										maximum_value = 120,
 										is_int = True)
 		self.threshold_difference = get_textbox(self.textbox_threshold,
 										minimum_value = 0,
-										maximum_value = 120,
+										maximum_value = 1200,
 										is_int = True)
 		self.gauss_deviation = get_textbox(self.textbox_gaussian,
 										minimum_value = 0,
-										maximum_value = 12,
+										maximum_value = 48,
 										is_int = True)
 		self.search_distance = get_textbox(self.textbox_search_dist,
 										minimum_value = 0,
-										maximum_value = 60,
+										maximum_value = 120,
 										is_int = True)
 		self.fine_gaussian = get_textbox(self.textbox_gaussian_fine,
 										minimum_value = 0,
-										maximum_value = 12,
+										maximum_value = 48,
 										is_int = True)
 	
 	def setup_strain_textboxes (self):
@@ -1835,8 +1863,11 @@ class Window(QWidget):
 			self.selecting_area = True
 	
 	def on_click (self, event):
-		self.position = np.array([int(np.floor(event.xdata)),
-								  int(np.floor(event.ydata))])
+		try:
+			self.position = np.array([int(np.floor(event.xdata)),
+									  int(np.floor(event.ydata))])
+		except:
+			return
 		if self.selecting_area:
 		#	self.position = np.array([int(np.floor(event.xdata)),
 		#							  int(np.floor(event.ydata))])
@@ -1869,6 +1900,10 @@ class Window(QWidget):
 				self.add_point()
 			elif self.select_mode == 'Delete':
 				self.remove_point()
+			elif self.select_mode == 'Exclude':
+				self.exclude_point()
+			elif self.select_mode == 'Include':
+				self.include_point()
 			elif self.select_mode == 'Move':
 				self.canvas.mpl_disconnect(self.click_id)
 				self.click_id = self.canvas.mpl_connect(
@@ -1929,26 +1964,29 @@ class Window(QWidget):
 										   self.position, axis=1)
 				closest = np.argmin(distances)
 				if distances[closest] <= self.neighbourhood_size * 2:
-					if self.fine_search_done:
-						if self.fine_results.shape[1] == \
-									self.track_points.shape[0]:
-							self.fine_results = np.delete(
-													self.fine_results,
-													closest, axis=1)
-					if self.fit_results_points is not None:
-						if self.fit_results_points.shape[0] == \
-									self.track_points.shape[0]:
-							self.fit_results_points = np.delete(
-													self.fit_results_points,
-													closest, axis=0)
-					if len(self.bad_points) > 0:
-						self.bad_points = np.delete(self.bad_points,
-								self.bad_points == closest, axis=0)
-						self.bad_points -= (self.bad_points > closest)
-					self.track_points = np.delete(self.track_points,
-												  closest, axis=0)
+					self.remove_bad_points(np.array([closest]))
 			if len(self.track_points) == 0:
 				self.track_points = None
+		self.update_points()
+	
+	def exclude_point (self):
+		if self.track_points is not None:
+			if len(self.track_points) > 0:
+				distances = np.linalg.norm(self.track_points - \
+										   self.position, axis=1)
+				closest = np.argmin(distances)
+				if distances[closest] <= self.neighbourhood_size * 2:
+					self.exclude_points(np.array([closest]))
+		self.update_points()
+	
+	def include_point (self):
+		if self.track_points is not None:
+			if len(self.track_points) > 0:
+				distances = np.linalg.norm(self.track_points - \
+										   self.position, axis=1)
+				closest = np.argmin(distances)
+				if distances[closest] <= self.neighbourhood_size * 2:
+					self.include_points(np.array([closest]))
 		self.update_points()
 	
 	def reset_bounds (self):
@@ -2054,11 +2092,14 @@ class Window(QWidget):
 		self.update_edges()
 		self.update_strains()
 	
-	def update_points (self, points = None, bad_points = None):
+	def update_points (self, points = None, bad_points = None,
+								excluded_points = None):
 		if points is not None:
 			self.track_points = points
 		if bad_points is not None:
 			self.bad_points = bad_points
+		if excluded_points is not None:
+			self.excluded_points = excluded_points
 		shifts = np.zeros_like(self.track_points)
 		if self.fine_search_done and self.fine_results is not None and \
 		   self.t_position > self.t_lower and \
@@ -2068,7 +2109,8 @@ class Window(QWidget):
 			else:
 				shifts = np.zeros_like(self.track_points)
 		self.canvas.update_points(self.track_points, shifts,
-									self.bad_points, self.selected_point)
+									self.bad_points, self.excluded_points,
+										self.selected_point)
 	
 	def update_edges (self, edges = None):
 		if edges is not None:
@@ -2130,49 +2172,82 @@ class Window(QWidget):
 		self.find_bad_points()
 		self.update_points()
 	
+	def clear_buttons (self):
+		self.button_select_points.setChecked(False)
+		self.button_add_points.setChecked(False)
+		self.button_delete_points.setChecked(False)
+		self.button_move_points.setChecked(False)
+		self.button_exclude_points.setChecked(False)
+		self.button_include_points.setChecked(False)
+	
 	def select_points_button (self):
+		self.clear_buttons()
 		if self.select_mode == 'Select':
 			self.select_mode = 'None'
-			self.button_select_points.setChecked(False)
 		else:
 			self.select_mode = 'Select'
 			self.button_select_points.setChecked(True)
-		self.button_add_points.setChecked(False)
-		self.button_delete_points.setChecked(False)
-		self.button_move_points.setChecked(False)
 	
 	def add_points_button (self):
+		self.clear_buttons()
 		if self.select_mode == 'Add':
 			self.select_mode = 'None'
-			self.button_add_points.setChecked(False)
 		else:
 			self.select_mode = 'Add'
 			self.button_add_points.setChecked(True)
-		self.button_select_points.setChecked(False)
-		self.button_delete_points.setChecked(False)
-		self.button_move_points.setChecked(False)
 	
 	def delete_points_button (self):
+		self.clear_buttons()
 		if self.select_mode == 'Delete':
 			self.select_mode = 'None'
-			self.button_delete_points.setChecked(False)
 		else:
 			self.select_mode = 'Delete'
 			self.button_delete_points.setChecked(True)
-		self.button_select_points.setChecked(False)
-		self.button_add_points.setChecked(False)
-		self.button_move_points.setChecked(False)
 	
 	def move_points_button (self):
+		self.clear_buttons()
 		if self.select_mode == 'Move':
 			self.select_mode = 'None'
-			self.button_move_points.setChecked(False)
 		else:
 			self.select_mode = 'Move'
 			self.button_move_points.setChecked(True)
-		self.button_select_points.setChecked(False)
-		self.button_add_points.setChecked(False)
-		self.button_delete_points.setChecked(False)
+	
+	def exclude_points_button (self):
+		self.clear_buttons()
+		if self.select_mode == 'Exclude':
+			self.select_mode = 'None'
+		else:
+			self.select_mode = 'Exclude'
+			self.button_exclude_points.setChecked(True)
+	
+	def include_points_button (self):
+		self.clear_buttons()
+		if self.select_mode == 'Include':
+			self.select_mode = 'None'
+		else:
+			self.select_mode = 'Include'
+			self.button_include_points.setChecked(True)
+	
+	def exclude_points (self, points = None):
+		if points is None:
+			return False
+		self.excluded_points = np.append(self.excluded_points, points)
+		self.excluded_points = np.unique(self.excluded_points)
+		self.update_points()
+	
+	def include_points (self, points = None):
+		if points is None:
+			return False
+		self.excluded_points = np.setdiff1d(self.excluded_points, points)
+		self.update_points()
+	
+	def exclude_bad_points (self):
+		if self.bad_points is None or len(self.bad_points) == 0:
+			return False
+		self.exclude_points(self.bad_points)
+	
+	def remove_bad_points_button (self):
+		self.remove_bad_points(self.bad_points)
 	
 	def find_bad_points (self):
 		bad_points = np.array([], dtype = int)
@@ -2195,20 +2270,31 @@ class Window(QWidget):
 				bad_points = np.append(bad_points, index)
 		self.bad_points = bad_points
 	
-	def remove_bad_points (self):
-		if self.bad_points is None or len(self.bad_points) == 0:
+	def remove_bad_points (self, bad_points = None):
+		if bad_points is None:
+			bad_points = self.bad_points
+		if bad_points is None or len(bad_points) == 0:
 			return
 		if self.fine_search_done:
 			if self.fine_results.shape[1] == len(self.track_points):
 				self.fine_results = np.delete(self.fine_results,
-										self.bad_points, axis=1)
+										bad_points, axis=1)
 		if self.fit_results_points is not None:
 			if len(self.fit_results_points) == len(self.track_points):
 				self.fit_results_points = np.delete(self.fit_results_points,
-										self.bad_points, axis=0)
-		self.track_points = np.delete(self.track_points, self.bad_points,
-										axis=0)
-		self.bad_points = np.array([], dtype = int)
+										bad_points, axis=0)
+		if self.phase_array is not None:
+			if len(self.phase_array) == len(self.track_points):
+				self.phase_array = np.delete(self.phase_array,
+										bad_points, axis=0)
+		if len(self.track_points) != 0:
+			self.track_points = np.delete(self.track_points,
+										bad_points, axis=0)
+		if bad_points is self.bad_points:
+			self.bad_points = np.array([], dtype = int)
+		elif self.bad_points is not None and len(self.bad_points) != 0:
+			to_remove = np.isin(self.bad_points, bad_points)
+			self.bad_points = self.bad_points[~to_remove]
 		self.update_points()
 	
 	def clear_points (self):
@@ -2352,7 +2438,7 @@ class Window(QWidget):
 								 self.channel).astype(float)
 		full_image_1 = ndi.gaussian_filter(full_image_1,
 											self.fine_gaussian)
-	#	full_image_1 = ndi.spline_filter(full_image_1)
+		# full_image_1 = ndi.spline_filter(full_image_1)
 		try:
 			for t in np.arange(self.t_lower, self.t_upper):
 				t_index = t - self.t_lower
@@ -2419,7 +2505,7 @@ class Window(QWidget):
 		data_points = self.coarse_results[:,self.elast_direction]
 		shifted = np.abs(data_points-data_points[0])
 		mask = shifted > np.amax(shifted)*0.2
-		self.fit_range_min = np.argmax(mask) + 5 # let it settle
+		self.fit_range_min = np.argmax(mask) - 1
 		self.fit_range_max = self.t_upper
 		self.setup_range_textboxes()
 		results = FitResults(
@@ -2465,8 +2551,8 @@ class Window(QWidget):
 														fit_data_points,
 														initial_guess,
 														full_output = True)
-#			print(np.sum(infodict['fvec']**2) / np.abs(fit_result[0]) /\
-#									(len(fit_time_points)-4))
+		#	print(np.sum(infodict['fvec']**2) / np.abs(fit_result[0]) /\
+		#							(len(fit_time_points)-4))
 			self.fit_results_average = FitResults(
 					time_points = time_points,
 					data_points = data_points,
@@ -2477,7 +2563,6 @@ class Window(QWidget):
 			message = "An error occurred:"+type(error).__name__+"–"+str(error)
 			display_error(message)
 		self.plot_canvas.update_plot(self.fit_results_average)
-		
 	
 	def fit_points (self):
 		if (not self.coarse_search_done) or (self.coarse_results is None):
@@ -2507,6 +2592,7 @@ class Window(QWidget):
 		fit_time_points = time_points[self.fit_range_min:self.fit_range_max]
 		self.bad_points = np.zeros(results.shape[1], dtype = bool)
 		self.fit_results_points = np.empty(results.shape[1], dtype = object)
+		exception_points = np.zeros(results.shape[1], dtype = bool)
 		for point_index in range(results.shape[1]):
 			data_points = results[:,point_index,self.elast_direction]
 			data_points -= np.mean(data_points)
@@ -2540,37 +2626,44 @@ class Window(QWidget):
 									(len(fit_time_points)-4) >\
 											self.elast_fit_thresh:
 					self.bad_points[point_index] = True
-			# if fit didn't work mark point bad.
+			# if fit didn't work mark point.
 			except Exception as error:
 				message = "An error occurred:"+type(error).__name__+"–"+str(error)
 				print(message)
-				self.bad_points[point_index] = True
-		if np.any(np.logical_not(self.bad_points)):
-			self.phase_array = self.track_points[self.bad_points != True]
+				exception_points[point_index] = True
+		if np.any(np.logical_not(exception_points)):
+			self.phase_array = self.track_points[exception_points != True]
 			phases = np.zeros(len(self.phase_array), dtype=float)
 			phase_index = 0
 			for index in range(len(self.track_points)):
-				if self.bad_points[index]:
+				if exception_points[index]:
 					continue
 				phase = self.fit_results_points[index].best_params[2]
 				phases[phase_index] = (phase+np.pi) % (2*np.pi) - np.pi
 				phase_index+=1
 			self.phase_array = np.hstack([self.phase_array,
 											phases[:,np.newaxis]])
-			x = self.phase_array[:,0]
-			y = self.phase_array[:,1]
-			z = self.phase_array[:,2]
-			delta_x = x[:,None]-x
-			delta_y = y[:,None]-y
-			sigma = self.elast_gaussian_radius
-			weights = np.exp(-(delta_x*delta_x+delta_y*delta_y) /\
-						(2*sigma*sigma)) / (np.sqrt(2*np.pi)*sigma)
-			weights /= np.sum(weights, axis=1, keepdims=True)
-			self.phase_array[:,2] = np.dot(weights,z)
+		#	if self.elast_gaussian_radius > 0:
+		#		x = self.phase_array[:,0]
+		#		y = self.phase_array[:,1]
+		#		z = self.phase_array[:,2]
+		#		delta_x = x[:,None]-x
+		#		delta_y = y[:,None]-y
+		#		sigma = self.elast_gaussian_radius
+		#		weights = np.exp(-(delta_x*delta_x+delta_y*delta_y) /\
+		#					(2*sigma*sigma)) / (np.sqrt(2*np.pi)*sigma)
+		#		weights /= np.sum(weights, axis=1, keepdims=True)
+		#		self.phase_array[:,2] = np.dot(weights,z)
 		self.update_points()
 		# bad_points is an array of indices not a boolean array elsewhere...
 		self.bad_points = np.argwhere(self.bad_points == True).flatten()
-		self.remove_bad_points()
+		exception_points = np.argwhere(exception_points == True).flatten()
+		self.remove_bad_points(exception_points)
+		# put into select mode
+		if self.select_mode != 'Select':
+			self.select_points_button()
+	
+	def calculate_derivatives (self):
 		self.triangulate()
 		self.update_edges()
 		self.update_triangles()
@@ -2586,34 +2679,36 @@ class Window(QWidget):
 			if cross_product[2] < 0:
 				cross_product *= -1
 			if self.elast_direction == 0:
-				derivative = cross_product[1]/cross_product[2]
+				derivative = cross_product[2]/cross_product[1]
 			else:
-				derivative = cross_product[0]/cross_product[2]
-			derivatives[triangle] += derivative
+				derivative = cross_product[2]/cross_product[0]
+			derivatives[triangle,2] += derivative
 			num_triangles[triangle] += 1
 		derivatives[:,2] /= num_triangles
 		self.derivatives = derivatives
-		# put into select mode
-		if self.select_mode != 'Select':
-			self.select_points_button()
 	
-	def plot_phases (self):
+	def analyse_phases (self):
 		if self.phase_array is None:
 			return False
 		if len(self.phase_array) == 0:
 			return False
-		try:
-			fig, ax = plt.subplots(subplot_kw={"projection": "3d"})
-			ax.scatter(self.phase_array[:,0], self.phase_array[:,1],
-								self.phase_array[:,2])
-			ax.set_xlabel('X')
-			ax.set_ylabel('Y')
-			plt.show()
-			return True
-		except:
-			return False
+#		try:
+		points = self.phase_array[:,0:2]
+		phases = self.phase_array[:,2]
+		if self.excluded_points is None or len(self.excluded_points)==0:
+			excluded = None
+		else:
+			excluded = self.excluded_points
+		from Phase_Tool import Window as PhaseWindow
+		self.phase_window = PhaseWindow(points, phases, excluded)
+		self.phase_window.show()
+#		except Exception as error:
+#			message = "An error occurred:"+type(error).__name__+"–"+str(error)
+#			print(message)
+#			return False
 	
 	def plot_derivatives (self):
+		self.calculate_derivatives()
 		if not (self.fine_search_done and self.fine_results is not None):
 			self.instruction_text.setText('Must do some tracking first.')
 			return False
@@ -2623,9 +2718,21 @@ class Window(QWidget):
 		if self.derivatives is None:
 			return False
 		try:
-			plt.scatter(self.derivatives[:,0],
-						self.derivatives[:,1],
-						c = self.derivatives[:,2])
+			derivatives = self.derivatives[:,2]
+			fig, ax = plt.subplots(subplot_kw={"projection": "3d"})
+			vectors = np.vstack([np.zeros_like(derivatives),
+								10*np.ones_like(derivatives),
+								10*np.ones_like(derivatives) / derivatives]).T
+			arrows = self.phase_array[:,np.newaxis,:]
+			arrows = np.append(arrows, self.phase)
+			ax.quiver(self.phase_array[:,0], self.phase_array[:,1],
+								self.phase_array[:,2],
+					  np.zeros_like(derivatives), 10*np.ones_like(derivatives),
+								10*np.ones_like(derivatives) / derivatives,
+					  normalize=False)
+		#	ax.scatter(self.derivatives[:,0],
+		#				self.derivatives[:,1],
+		#				c = self.derivatives[:,2])
 			plt.show()
 			return True
 		except:
@@ -2755,9 +2862,8 @@ class Window(QWidget):
 		if self.file_path is not None:
 			np.savetxt(self.file_path.with_suffix(
 				'.{0:s}.csv'.format(time.strftime("%Y.%m.%d-%H.%M.%S"))),
-				output_array,  delimiter = ',',
-				fmt = data_format,
-				header = header)
+				output_array,  delimiter = ',', comments = '#',
+				fmt = data_format, header = header)
 	
 	def save_phases (self):
 		if not (self.coarse_search_done or self.fine_search_done):
@@ -2767,13 +2873,31 @@ class Window(QWidget):
 			self.instruction_text.setText('Must do fitting first.')
 			return False
 		data_format = '%.18e', '%.18e', '%.18e'
-		header = 'X,Y,Phase'
-		np.savetxt(self.file_path.with_suffix(
-			'.{0:s}.phase.csv'.format(time.strftime("%Y.%m.%d-%H.%M.%S"))),
-			self.phase_array,  delimiter = ',',
-			fmt = data_format,
-			header = header)
-		
+		header = '# X, Y, Phase'
+		phase_array = self.phase_array
+		phase_array[:,0:2] *= self.scale[0:2]
+		output_file = self.file_path.with_suffix(
+			'.{0:s}.phase.csv'.format(time.strftime("%Y.%m.%d-%H.%M.%S")))
+		options = QFileDialog.Options()
+		options |= QFileDialog.DontUseNativeDialog
+		file_name, _ = QFileDialog.getSaveFileName(self,
+								'Save CSV File',
+								str(output_file),
+								'All Files (*)',
+								options=options)
+		if file_name == '':
+			return False
+		else:
+			file_path = Path(file_name)
+			if file_path.suffix.lower() == '.csv':
+				output_file = file_path
+			else:
+				output_file = file_path.with_suffix('.csv')
+		np.savetxt(output_file, self.phase_array, 
+						delimiter = ',', comments = '#',
+						fmt = data_format, header = header)
+		print(f'saved to: {str(output_file):s}')
+		return True
 	
 	def save_frames (self):
 		if self.file_path is None:
@@ -2813,4 +2937,3 @@ if __name__ == "__main__":
 
 ################################################################################
 # EOF
-
