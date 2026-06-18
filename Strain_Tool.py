@@ -1161,6 +1161,9 @@ class Window(QWidget):
 		self.tukey_alpha = 0.5 # None uses Hann window
 		self.max_length = 0
 		#
+		self.elast_direction = 0
+		self.conduction_method = 'Threshold'
+		#
 		self.track_points = np.zeros((0,2), dtype = int)
 		self.bad_points = np.array([], dtype = int)
 		self.excluded_points = np.array([], dtype = int)
@@ -1589,6 +1592,9 @@ class Window(QWidget):
 		#
 		strain_layout.addWidget(QLabel('Conduction Velocity'))
 		#
+		self.cond_method_selector = setup_combobox(
+							self.cond_method_select,
+							strain_layout, 'Method:')
 		strain_layout.addStretch()
 		horizontal_separator(strain_layout, self.palette())
 		#
@@ -1821,6 +1827,21 @@ class Window(QWidget):
 	def elast_direction_select (self, index):
 		self.elast_direction = index
 	
+	def cond_method_select (self, index):
+		if index == 0:
+			self.conduction_method = 'Threshold'
+		elif index == 1:
+			self.conduction_method = 'Peak'
+		else:
+			self.reset_cond_method()
+			print(self.conduction_method)
+	
+	def reset_cond_method (self):
+		self.cond_method_selector.clear()
+		self.cond_method_selector.addItems(np.array(['Threshold', 'Peak']))
+		self.cond_method_selector.setCurrentIndex(0)
+		self.conduction_method = 'Threshold'
+	
 	def reset_channel_selector (self):
 		self.channel_selector.clear()
 		self.channel_selector.addItems(self.channel_names)
@@ -2043,6 +2064,7 @@ class Window(QWidget):
 			self.reset_channel_selector()
 			self.reset_strain_direction()
 			self.reset_elast_direction()
+			self.reset_cond_method()
 			self.instruction_text.setText('Use "focus" tab to setup ' + \
 										  'working area and "points" ' + \
 										  'tab to choose points to track.')
@@ -2293,8 +2315,11 @@ class Window(QWidget):
 		if bad_points is self.bad_points:
 			self.bad_points = np.array([], dtype = int)
 		elif self.bad_points is not None and len(self.bad_points) != 0:
-			to_remove = np.isin(self.bad_points, bad_points)
-			self.bad_points = self.bad_points[~to_remove]
+			for bad_point in bad_points:
+				if bad_point in self.bad_points:
+					self.bad_points = np.delete(self.bad_points,
+							np.argwhere(self.bad_points == bad_point), axis=0)
+				self.bad_points[self.bad_points > bad_point] -= 1
 		self.update_points()
 	
 	def clear_points (self):
